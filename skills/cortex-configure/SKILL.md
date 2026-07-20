@@ -51,7 +51,21 @@ Allow fine-tuning of specific settings:
    - Show Cortex in status line
    - Default: true
 
-5. **Awareness** (section)
+5. **Daemon mode** (shared server, opt-in)
+   - ONE background server holds the database + embedding model for ALL
+     Claude Code sessions (large RAM savings with multiple sessions).
+   - Default: disabled (classic per-session mode).
+   - Toggle with:
+     ```bash
+     node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure daemon on    # enable + start
+     node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure daemon off   # back to classic
+     node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure daemon status
+     ```
+   - After toggling, the user must restart Claude Code sessions to apply.
+   - The daemon auto-starts with sessions and auto-replaces itself when the
+     plugin is updated (version handshake) - no manual management needed.
+
+6. **Awareness** (section)
    - Injects user/time/date context at session start and after context clear
 
    **Step 1: enabled** (true/false) — ask first, before anything else:
@@ -98,19 +112,30 @@ Location: `~/.cortex/config.json`
     "showContext": true
   },
   "archive": {
-    "autoOnCompact": true,
     "projectScope": true,
     "minContentLength": 50
   },
-  "automation": {
-    "autoSaveThreshold": 70,
-    "restorationTokenBudget": 2000,
-    "restorationMessageCount": 5
+  "autosave": {
+    "onSessionEnd": true,
+    "onPreCompact": true,
+    "contextStep": {
+      "enabled": true,
+      "step": 5
+    }
+  },
+  "restoration": {
+    "tokenBudget": 2000,
+    "messageCount": 5,
+    "turnCount": 3
   },
   "awareness": {
     "enabled": false,
     "userName": null,
     "timezone": null
+  },
+  "daemon": {
+    "enabled": false,
+    "port": 4983
   }
 }
 ```

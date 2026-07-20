@@ -562,16 +562,16 @@ var require_sql_wasm = __commonJS({
           throw b;
         }, D = "", Ea, Fa;
         if (ca) {
-          var fs5 = __require("fs");
+          var fs6 = __require("fs");
           __require("path");
           D = __dirname + "/";
           Fa = (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs5.readFileSync(a);
+            return fs6.readFileSync(a);
           };
           Ea = async (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs5.readFileSync(a, void 0);
+            return fs6.readFileSync(a, void 0);
           };
           !f.thisProgram && 1 < process.argv.length && (Ca = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -898,7 +898,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs5.readSync(d, b, 0, 256);
+                  c = fs6.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -6449,13 +6449,18 @@ var AwarenessConfigSchema = external_exports.object({
   userName: external_exports.string().nullable(),
   timezone: external_exports.string().nullable()
 });
+var DaemonConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  port: external_exports.number().min(1024).max(65535)
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
   autosave: AutosaveConfigSchema,
   restoration: RestorationConfigSchema,
   setup: SetupConfigSchema,
-  awareness: AwarenessConfigSchema
+  awareness: AwarenessConfigSchema,
+  daemon: DaemonConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6490,13 +6495,18 @@ var DEFAULT_AWARENESS_CONFIG = {
   userName: null,
   timezone: null
 };
+var DEFAULT_DAEMON_CONFIG = {
+  enabled: false,
+  port: 4983
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
   autosave: DEFAULT_AUTOSAVE_CONFIG,
   restoration: DEFAULT_RESTORATION_CONFIG,
   setup: DEFAULT_SETUP_CONFIG,
-  awareness: DEFAULT_AWARENESS_CONFIG
+  awareness: DEFAULT_AWARENESS_CONFIG,
+  daemon: DEFAULT_DAEMON_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -6519,6 +6529,16 @@ function ensureBackupsDir() {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+function getDaemonInfoPath() {
+  return path.join(getDataDir(), "daemon.json");
+}
+function getDaemonPort() {
+  const envPort = process.env.CORTEX_PORT ? parseInt(process.env.CORTEX_PORT, 10) : NaN;
+  if (!Number.isNaN(envPort) && envPort >= 1024 && envPort <= 65535) {
+    return envPort;
+  }
+  return loadConfig().daemon.port;
 }
 function ensureDataDir() {
   const dir = getDataDir();
@@ -8140,7 +8160,10 @@ function getAnalyticsSummary() {
   };
 }
 
-// src/mcp-server.ts
+// src/version.ts
+var VERSION = "2.1.4" ? "2.1.4" : "0.0.0-dev";
+
+// src/tools.ts
 var TOOLS = [
   {
     name: "cortex_recall",
@@ -8646,7 +8669,6 @@ async function handleAnalytics(params) {
 }
 function generateInsights(summary) {
   const insights = [];
-  const config = loadConfig();
   if (summary.averageContextAtSave > 0) {
     const threshold = 70;
     const diff = Math.abs(summary.averageContextAtSave - threshold);
@@ -8666,138 +8688,266 @@ function generateInsights(summary) {
 }
 function generateRecommendations(summary) {
   const recommendations = [];
-  const config = loadConfig();
   if (summary.averageContextAtSave > 85) {
     recommendations.push("Your context often gets very high before saving - consider using /save more frequently");
   }
   return recommendations;
 }
-var MCPServer = class {
-  db = null;
-  async initialize() {
-    this.db = await initDb();
+function makeInitializeResult() {
+  return {
+    protocolVersion: "2024-11-05",
+    capabilities: {
+      tools: {}
+    },
+    serverInfo: {
+      name: "cortex-memory",
+      version: VERSION
+    }
+  };
+}
+async function callTool(db, name, args) {
+  switch (name) {
+    case "cortex_recall":
+      return handleRecall(db, args);
+    case "cortex_remember":
+      return handleRemember(db, args);
+    case "cortex_save":
+    case "cortex_archive":
+      return handleSave(db, args);
+    case "cortex_stats":
+      return handleStats(db, args);
+    case "cortex_restore":
+      return handleRestore(db, args);
+    case "cortex_delete":
+      return handleDelete(db, args);
+    case "cortex_update":
+      return handleUpdate(db, args);
+    case "cortex_rename_project":
+      return handleRenameProject(db, args);
+    case "cortex_forget_project":
+      return handleForgetProject(db, args);
+    case "cortex_analytics":
+      return handleAnalytics(args);
+    default:
+      return null;
   }
-  async handleRequest(request) {
-    const { id, method, params } = request;
-    try {
-      switch (method) {
-        case "initialize":
-          return this.handleInitialize(id);
-        case "tools/list":
-          return this.handleToolsList(id);
-        case "tools/call":
-          return await this.handleToolCall(id, params);
-        default:
+}
+async function handleMcpRequest(db, request) {
+  const { id, method, params } = request;
+  try {
+    switch (method) {
+      case "initialize":
+        return { jsonrpc: "2.0", id, result: makeInitializeResult() };
+      case "tools/list":
+        return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+      case "tools/call": {
+        const { name, arguments: args } = params;
+        const result = await callTool(db, name, args || {});
+        if (result === null) {
           return {
             jsonrpc: "2.0",
             id,
             error: {
               code: -32601,
-              message: `Method not found: ${method}`
+              message: `Unknown tool: ${name}`
             }
           };
-      }
-    } catch (error) {
-      return {
-        jsonrpc: "2.0",
-        id,
-        error: {
-          code: -32603,
-          message: error instanceof Error ? error.message : String(error)
         }
-      };
-    }
-  }
-  handleInitialize(id) {
-    return {
-      jsonrpc: "2.0",
-      id,
-      result: {
-        protocolVersion: "2024-11-05",
-        capabilities: {
-          tools: {}
-        },
-        serverInfo: {
-          name: "cortex-memory",
-          version: "2.1.4"
-        }
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(result, null, 2)
+              }
+            ]
+          }
+        };
       }
-    };
-  }
-  handleToolsList(id) {
-    return {
-      jsonrpc: "2.0",
-      id,
-      result: {
-        tools: TOOLS
-      }
-    };
-  }
-  async handleToolCall(id, params) {
-    if (!this.db) {
-      this.db = await initDb();
-    }
-    const { name, arguments: args } = params;
-    let result;
-    switch (name) {
-      case "cortex_recall":
-        result = await handleRecall(this.db, args);
-        break;
-      case "cortex_remember":
-        result = await handleRemember(this.db, args);
-        break;
-      case "cortex_save":
-      case "cortex_archive":
-        result = await handleSave(this.db, args);
-        break;
-      case "cortex_stats":
-        result = await handleStats(this.db, args);
-        break;
-      case "cortex_restore":
-        result = await handleRestore(this.db, args);
-        break;
-      case "cortex_delete":
-        result = await handleDelete(this.db, args);
-        break;
-      case "cortex_update":
-        result = await handleUpdate(this.db, args);
-        break;
-      case "cortex_rename_project":
-        result = await handleRenameProject(this.db, args);
-        break;
-      case "cortex_forget_project":
-        result = await handleForgetProject(this.db, args);
-        break;
-      case "cortex_analytics":
-        result = await handleAnalytics(args);
-        break;
       default:
         return {
           jsonrpc: "2.0",
           id,
           error: {
             code: -32601,
-            message: `Unknown tool: ${name}`
+            message: `Method not found: ${method}`
           }
         };
     }
+  } catch (error) {
     return {
       jsonrpc: "2.0",
       id,
-      result: {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2)
-          }
-        ]
+      error: {
+        code: -32603,
+        message: error instanceof Error ? error.message : String(error)
       }
     };
   }
-};
+}
+
+// src/daemon-client.ts
+import { spawn } from "child_process";
+import * as fs5 from "fs";
+function getDaemonBaseUrl() {
+  return `http://127.0.0.1:${getDaemonPort()}`;
+}
+async function daemonFetch(path3, options = {}) {
+  const { method = "GET", body, timeoutMs = 1e3 } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
+      method,
+      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      body: body !== void 0 ? JSON.stringify(body) : void 0,
+      signal: controller.signal
+    });
+    if (!response.ok && response.status !== 202) {
+      const errBody = await response.text().catch(() => "");
+      throw new Error(
+        `Daemon responded ${response.status} for ${path3}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
+      );
+    }
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function getDaemonHealth(timeoutMs = 500) {
+  try {
+    const health = await daemonFetch("/health", { timeoutMs });
+    return health;
+  } catch {
+    return null;
+  }
+}
+function getDaemonScriptPath() {
+  return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
+}
+function spawnDaemonDetached() {
+  try {
+    const daemonPath = getDaemonScriptPath();
+    if (!fs5.existsSync(daemonPath)) {
+      return false;
+    }
+    const child = spawn(process.execPath, [daemonPath], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function stopDaemon() {
+  let requested = false;
+  try {
+    await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
+    requested = true;
+  } catch {
+    try {
+      const infoPath = getDaemonInfoPath();
+      if (fs5.existsSync(infoPath)) {
+        const info = JSON.parse(fs5.readFileSync(infoPath, "utf8"));
+        if (info.pid) {
+          process.kill(info.pid, "SIGTERM");
+          requested = true;
+        }
+      }
+    } catch {
+    }
+  }
+  return requested;
+}
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function ensureDaemon(waitMs = 1e4) {
+  const health = await getDaemonHealth();
+  if (health && health.version === VERSION) {
+    return true;
+  }
+  if (health && health.version !== VERSION) {
+    await stopDaemon();
+    const shutdownDeadline = Date.now() + 3e3;
+    while (Date.now() < shutdownDeadline) {
+      if (!await getDaemonHealth(300))
+        break;
+      await delay(150);
+    }
+  }
+  if (!spawnDaemonDetached()) {
+    return false;
+  }
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    const current = await getDaemonHealth(400);
+    if (current && current.version === VERSION) {
+      return true;
+    }
+    await delay(200);
+  }
+  return false;
+}
+async function forwardMcpRequest(request, timeoutMs = 3e5) {
+  const response = await daemonFetch("/mcp", { method: "POST", body: request, timeoutMs });
+  return response;
+}
+
+// src/mcp-server.ts
+async function resolveMode() {
+  const config = loadConfig();
+  if (!config.daemon.enabled) {
+    return "local";
+  }
+  const daemonReady = await ensureDaemon();
+  if (daemonReady) {
+    return "proxy";
+  }
+  console.error("[cortex] Daemon mode enabled but daemon could not be started - falling back to local mode");
+  return "local";
+}
+async function dispatchProxy(request) {
+  try {
+    return await forwardMcpRequest(request);
+  } catch {
+    const recovered = await ensureDaemon();
+    if (recovered) {
+      try {
+        return await forwardMcpRequest(request);
+      } catch (retryError) {
+        return {
+          jsonrpc: "2.0",
+          id: request.id,
+          error: {
+            code: -32603,
+            message: `Cortex daemon unreachable: ${retryError instanceof Error ? retryError.message : String(retryError)}`
+          }
+        };
+      }
+    }
+    return {
+      jsonrpc: "2.0",
+      id: request.id,
+      error: {
+        code: -32603,
+        message: "Cortex daemon unreachable and could not be restarted"
+      }
+    };
+  }
+}
 async function main() {
-  const server = new MCPServer();
-  await server.initialize();
+  const mode = await resolveMode();
+  let db = null;
+  if (mode === "local") {
+    db = await initDb();
+  }
   const rl = readline2.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -8812,7 +8962,7 @@ async function main() {
         return;
       }
       const request = message;
-      const response = await server.handleRequest(request);
+      const response = mode === "proxy" ? await dispatchProxy(request) : await handleMcpRequest(db, request);
       console.log(JSON.stringify(response));
     } catch (error) {
       const errorResponse = {

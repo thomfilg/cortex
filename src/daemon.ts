@@ -1,0 +1,376 @@
+/**
+ * Cortex Daemon
+ * Optional shared HTTP server: ONE process holds the database and the
+ * embedding model, serving any number of Claude Code instances.
+ *
+ * Endpoints:
+ *   GET  /health    - liveness + version (used for the auto-update handshake)
+ *   POST /mcp       - MCP JSON-RPC (initialize, tools/list, tools/call)
+ *   GET  /stats     - statusline data (?projectId= for project stats)
+ *   POST /restore   - formatted restoration context
+ *   POST /archive   - archive a session (async: true -> queued, returns 202)
+ *   POST /shutdown  - graceful shutdown (used when a newer plugin build takes over)
+ *
+ * Singleton: on EADDRINUSE, if a healthy daemon of the SAME version holds
+ * the port we exit quietly; a DIFFERENT version is asked to shut down and
+ * we take over (this is how the daemon auto-updates with the plugin).
+ */
+
+import * as http from 'http';
+import * as fs from 'fs';
+import { initDb, closeDb, getStats, getProjectStats } from './database.js';
+import { handleMcpRequest, type MCPRequest } from './tools.js';
+import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
+import { getDaemonPort, getDaemonInfoPath, markAutoSaved } from './config.js';
+import { recordSavePoint } from './analytics.js';
+import { getDaemonHealth, stopDaemon } from './daemon-client.js';
+import { VERSION } from './version.js';
+import type { Database as SqlJsDatabase } from 'sql.js';
+
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
+const startedAt = Date.now();
+
+// Database loads once, lazily awaited by handlers (loading a large DB can
+// take seconds; /health responds immediately so clients see us come up)
+let dbPromise: Promise<SqlJsDatabase> | null = null;
+function getDb(): Promise<SqlJsDatabase> {
+  if (!dbPromise) {
+    dbPromise = initDb();
+  }
+  return dbPromise;
+}
+
+// Serialize archive operations: single writer, no concurrent full-DB exports
+let archiveChain: Promise<void> = Promise.resolve();
+
+interface ArchiveRequestBody {
+  transcriptPath: string;
+  projectId?: string | null;
+  contextPercent?: number;
+  markAutoSave?: boolean;
+  async?: boolean;
+}
+
+async function runArchive(body: ArchiveRequestBody): Promise<{ archived: number; skipped: number; duplicates: number; formatted: string }> {
+  const db = await getDb();
+  const projectId = body.projectId ?? null;
+  const result = await archiveSession(db, body.transcriptPath, projectId);
+
+  if (body.markAutoSave) {
+    // Update shared auto-save state so statuslines across sessions reflect it.
+    // archived === 0 is recorded too, preventing immediate re-trigger loops.
+    markAutoSaved(body.transcriptPath, body.contextPercent ?? 0, result.archived);
+  }
+  if (result.archived > 0) {
+    recordSavePoint(body.contextPercent ?? 0, result.archived);
+  }
+
+  return { ...result, formatted: formatArchiveResult(result) };
+}
+
+function enqueueArchive(body: ArchiveRequestBody): Promise<{ archived: number; skipped: number; duplicates: number; formatted: string }> {
+  const job = archiveChain.then(() => runArchive(body));
+  archiveChain = job.then(
+    () => undefined,
+    () => undefined
+  );
+  return job;
+}
+
+// ============================================================================
+// HTTP plumbing
+// ============================================================================
+
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    let rejected = false;
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => {
+      if (rejected) return;
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        rejected = true;
+        reject(new Error('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!rejected) resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+    req.on('error', (error) => {
+      if (!rejected) {
+        rejected = true;
+        reject(error);
+      }
+    });
+  });
+}
+
+/**
+ * Parse a JSON request body, returning null on malformed input
+ * (callers respond 400 instead of throwing into the 500 path)
+ */
+function parseBody<T>(raw: string): T | null {
+  try {
+    return JSON.parse(raw || '{}') as T;
+  } catch {
+    return null;
+  }
+}
+
+function respondJson(res: http.ServerResponse, status: number, payload: unknown): void {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(body);
+}
+
+async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  const route = `${req.method} ${url.pathname}`;
+
+  switch (route) {
+    case 'GET /health': {
+      respondJson(res, 200, {
+        name: 'cortex-daemon',
+        version: VERSION,
+        pid: process.pid,
+        port: getDaemonPort(),
+        uptime: Math.round((Date.now() - startedAt) / 1000),
+      });
+      return;
+    }
+
+    case 'POST /mcp': {
+      const raw = await readBody(req);
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(raw);
+      } catch (error) {
+        respondJson(res, 400, {
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32700, message: 'Parse error', data: error instanceof Error ? error.message : String(error) },
+        });
+        return;
+      }
+
+      // Notifications (no id) require no response
+      if (!('id' in message)) {
+        res.writeHead(202).end();
+        return;
+      }
+
+      const db = await getDb();
+      const response = await handleMcpRequest(db, message as unknown as MCPRequest);
+      respondJson(res, 200, response);
+      return;
+    }
+
+    case 'GET /stats': {
+      const db = await getDb();
+      const stats = getStats(db);
+      const payload: Record<string, unknown> = {
+        version: VERSION,
+        fragmentCount: stats.fragmentCount,
+        projectCount: stats.projectCount,
+        sessionCount: stats.sessionCount,
+        dbSizeBytes: stats.dbSizeBytes,
+      };
+
+      const projectId = url.searchParams.get('projectId');
+      if (projectId) {
+        const projectStats = getProjectStats(db, projectId);
+        payload.project = {
+          fragmentCount: projectStats.fragmentCount,
+          sessionCount: projectStats.sessionCount,
+          lastArchive: projectStats.lastArchive?.toISOString() || null,
+        };
+      }
+
+      respondJson(res, 200, payload);
+      return;
+    }
+
+    case 'POST /restore': {
+      const body = parseBody<{
+        projectId?: string | null;
+        messageCount?: number;
+        tokenBudget?: number;
+      }>(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      const db = await getDb();
+      const restoration = await buildRestorationContext(db, body.projectId ?? null, {
+        messageCount: body.messageCount ?? 5,
+        tokenBudget: body.tokenBudget ?? 2000,
+      });
+      respondJson(res, 200, {
+        hasContent: restoration.hasContent,
+        formatted: restoration.hasContent ? formatRestorationContext(restoration) : '',
+      });
+      return;
+    }
+
+    case 'POST /archive': {
+      const body = parseBody<ArchiveRequestBody>(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (!body.transcriptPath) {
+        respondJson(res, 400, { error: 'transcriptPath is required' });
+        return;
+      }
+
+      if (body.async) {
+        // Queue and acknowledge immediately (statusline/post-tool hooks
+        // have tight timeouts and must not wait for embedding work)
+        enqueueArchive(body).catch(() => undefined);
+        respondJson(res, 202, { queued: true });
+        return;
+      }
+
+      const result = await enqueueArchive(body);
+      respondJson(res, 200, result);
+      return;
+    }
+
+    case 'POST /shutdown': {
+      respondJson(res, 200, { shuttingDown: true });
+      setTimeout(() => shutdown(0), 50);
+      return;
+    }
+
+    default: {
+      respondJson(res, 404, { error: `Unknown route: ${route}` });
+    }
+  }
+}
+
+// ============================================================================
+// Lifecycle
+// ============================================================================
+
+function writeDaemonInfo(port: number): void {
+  try {
+    fs.writeFileSync(
+      getDaemonInfoPath(),
+      JSON.stringify({ pid: process.pid, port, version: VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)
+    );
+  } catch {
+    // Non-fatal
+  }
+}
+
+function removeDaemonInfo(): void {
+  try {
+    const infoPath = getDaemonInfoPath();
+    if (fs.existsSync(infoPath)) {
+      const info = JSON.parse(fs.readFileSync(infoPath, 'utf8')) as { pid?: number };
+      // Only remove our own record (a replacement daemon may have written its own)
+      if (info.pid === process.pid) {
+        fs.unlinkSync(infoPath);
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+let shuttingDown = false;
+
+function shutdown(code: number): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    // Persist and close the database (only if it was ever opened)
+    if (dbPromise) {
+      closeDb();
+    }
+  } catch {
+    // Persisting is best-effort on shutdown
+  }
+  removeDaemonInfo();
+  process.exit(code);
+}
+
+async function main(): Promise<void> {
+  // database.ts registers exit-immediately signal handlers at import time;
+  // the daemon needs graceful shutdown (save DB, remove pidfile) instead
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.removeAllListeners(sig);
+    process.on(sig, () => shutdown(0));
+  }
+
+  const port = getDaemonPort();
+
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch((error) => {
+      try {
+        respondJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      } catch {
+        // Response already sent/closed
+      }
+    });
+  });
+
+  let attempts = 0;
+  let handlingBindError = false;
+  const MAX_ATTEMPTS = 3;
+
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EADDRINUSE') {
+      console.error(`[cortex-daemon] Server error: ${error.message}`);
+      process.exit(1);
+    }
+
+    // Guard against overlapping error events (concurrent session starts can
+    // race here); only one takeover attempt runs at a time
+    if (handlingBindError) return;
+    handlingBindError = true;
+
+    // Port occupied: same-version daemon -> we're redundant, exit quietly.
+    // Different version (plugin was updated) -> ask it to stop and take over.
+    void (async () => {
+      const occupant = await getDaemonHealth(600);
+
+      if (occupant && occupant.version === VERSION) {
+        process.exit(0);
+      }
+
+      attempts++;
+      if (attempts >= MAX_ATTEMPTS) {
+        console.error(`[cortex-daemon] Port ${port} is busy and could not be reclaimed`);
+        process.exit(1);
+      }
+
+      if (occupant) {
+        await stopDaemon();
+      }
+      setTimeout(() => {
+        handlingBindError = false;
+        server.listen(port, '127.0.0.1');
+      }, 750);
+    })();
+  });
+
+  server.listen(port, '127.0.0.1', () => {
+    writeDaemonInfo(port);
+    console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    // Start loading the database in the background so first requests are fast
+    void getDb().catch((error) => {
+      console.error(`[cortex-daemon] Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    });
+  });
+}
+
+main().catch((error) => {
+  console.error('[cortex-daemon] Fatal:', error);
+  process.exit(1);
+});

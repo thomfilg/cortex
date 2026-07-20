@@ -4,13 +4,15 @@
  */
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
-import { loadConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, type ConfigPreset } from './config.js';
+import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, type ConfigPreset } from './config.js';
+import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, type DaemonStats } from './daemon-client.js';
+import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
 import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, formatSearchResults } from './search.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
-import { startSession, updateContextPercent, recordSavePoint, recordClear, getCurrentSession } from './analytics.js';
+import { startSession, recordSavePoint } from './analytics.js';
 import type { StdinData, CommandName, Config } from './types.js';
 
 // ============================================================================
@@ -127,7 +129,19 @@ async function main() {
         break;
 
       case 'setup':
-        await handleSetup();
+        await handleSetup(args.slice(1));
+        break;
+
+      case 'ensure-daemon':
+        await handleEnsureDaemon();
+        break;
+
+      case 'daemon-status':
+        await handleDaemonStatus();
+        break;
+
+      case 'daemon-stop':
+        await handleDaemonStop();
         break;
 
       case 'configure':
@@ -211,9 +225,24 @@ function executeChainedStatusline(): string | null {
 async function handleStatusline() {
   const stdin = await readStdin();
   const config = loadConfig();
+  const daemonMode = config.daemon.enabled;
 
-  // Initialize database (may create if doesn't exist)
-  const db = await initDb();
+  // Daemon mode: the statusline never touches the database directly -
+  // it asks the shared daemon and spawns it if it's not running.
+  // Classic mode: initialize database locally, exactly as before.
+  let remoteStats: DaemonStats | null = null;
+  let db: Awaited<ReturnType<typeof initDb>> | null = null;
+
+  if (daemonMode) {
+    remoteStats = await getDaemonStats(null, 300);
+    if (!remoteStats || remoteStats.version !== VERSION) {
+      // Not running, or running an outdated build (plugin was updated):
+      // spawn our build - it replaces an outdated occupant automatically
+      spawnDaemonDetached();
+    }
+  } else {
+    db = await initDb();
+  }
 
   // Track context for logic and display
   let contextPercent = 0;
@@ -229,22 +258,35 @@ async function handleStatusline() {
     // Check context step autosave (runs regardless of statusline display setting)
     if (config.autosave.contextStep.enabled && stdin.transcript_path) {
       if (shouldAutoSave(contextPercent, stdin.transcript_path)) {
-        // Reuse performAutosave logic but inline here to avoid duplicate DB init
-        // or just call performAutosave if we refactor it to accept DB/stdin
-
-        // Let's use the helper but we need to pass stdin/trigger
-        // IMPORTANT: We need to await it
-
-        const projectId = getProjectId(stdin.cwd);
-        const result = await archiveSession(db, stdin.transcript_path, projectId);
-
-        if (result.archived > 0) {
-          markAutoSaved(stdin.transcript_path, contextPercent, result.archived);
-          recordSavePoint(contextPercent, result.archived);
-          // Metadata for debug/hooks if needed
+        if (daemonMode) {
+          // Queue the archive on the daemon (fast 202 ack) - the embedding
+          // work happens in the daemon, not in this transient process
+          setSavingState(true, stdin.transcript_path);
+          const queued = await requestDaemonArchive({
+            transcriptPath: stdin.transcript_path,
+            // 'unknown' (root dir) means no project: store as global
+            projectId: projectId === 'unknown' ? null : projectId,
+            contextPercent,
+            markAutoSave: true,
+            async: true,
+            // Statusline is the hottest path: never stall the render
+            timeoutMs: 500,
+          });
+          if (!queued) {
+            setSavingState(false, null);
+            spawnDaemonDetached();
+          }
         } else {
-          // Update state to avoid retry
-          markAutoSaved(stdin.transcript_path, contextPercent, 0);
+          const result = await archiveSession(db!, stdin.transcript_path, projectId);
+
+          if (result.archived > 0) {
+            markAutoSaved(stdin.transcript_path, contextPercent, result.archived);
+            recordSavePoint(contextPercent, result.archived);
+            // Metadata for debug/hooks if needed
+          } else {
+            // Update state to avoid retry
+            markAutoSaved(stdin.transcript_path, contextPercent, 0);
+          }
         }
       }
     }
@@ -252,7 +294,10 @@ async function handleStatusline() {
 
   // === Statusline display (only if enabled) ===
   if (config.statusline.enabled) {
-    const stats = getStats(db);
+    // Daemon unreachable -> null: render without the count for this refresh
+    const fragmentCount = daemonMode
+      ? remoteStats?.fragmentCount ?? null
+      : getStats(db!).fragmentCount;
     const parts: string[] = [];
 
     // Execute chained statusline first (if configured)
@@ -266,8 +311,8 @@ async function handleStatusline() {
     parts.push(`${ANSI.brick}Ψ${ANSI.reset}`);
 
     // Memory count
-    if (config.statusline.showFragments) {
-      parts.push(formatCompactNumber(stats.fragmentCount));
+    if (config.statusline.showFragments && fragmentCount !== null) {
+      parts.push(formatCompactNumber(fragmentCount));
     }
 
     // Context usage with circle strip
@@ -291,7 +336,9 @@ async function handleStatusline() {
       }
 
       // Check if we should trigger a new save
-      if (stdin?.transcript_path && config.autosave.contextStep.enabled) {
+      // (daemon mode already queued its archive above - this background-save
+      // spawn is the classic per-process path only)
+      if (!daemonMode && stdin?.transcript_path && config.autosave.contextStep.enabled) {
         if (shouldAutoSave(contextPercent, stdin.transcript_path)) {
           // START BACKGROUND SAVE
           setSavingState(true, stdin.transcript_path);
@@ -418,9 +465,6 @@ async function handleSessionStart() {
   // Reset auto-save state for new session
   resetAutoSaveState();
 
-  // Initialize database
-  const db = await initDb();
-
   // Get project ID, treating 'unknown' (from root dir "/") as null
   const rawProjectId = stdin?.cwd ? getProjectId(stdin.cwd) : null;
   const projectId = rawProjectId === 'unknown' ? null : rawProjectId;
@@ -432,6 +476,17 @@ async function handleSessionStart() {
 
   // Start analytics session
   startSession(projectId);
+
+  // Daemon mode: bring the shared daemon up (spawning/replacing as needed)
+  // and render from it - this process never loads the database
+  if (config.daemon.enabled) {
+    const handled = await sessionStartViaDaemon(config, projectId);
+    if (handled) return;
+    // Daemon unavailable: fall through to the classic local path
+  }
+
+  // Initialize database
+  const db = await initDb();
 
   // Get project stats
   const projectStats = projectId ? getProjectStats(db, projectId) : null;
@@ -469,6 +524,54 @@ async function handleSessionStart() {
 }
 
 /**
+ * Session start via the shared daemon (daemon mode).
+ * Returns false when the daemon can't be reached so the caller can fall
+ * back to the classic local path.
+ */
+async function sessionStartViaDaemon(config: Config, projectId: string | null): Promise<boolean> {
+  // SessionStart hook timeout is 10s; leave room for the fallback path
+  const ready = await ensureDaemon(8000);
+  if (!ready) return false;
+
+  const stats = await getDaemonStats(projectId, 3000);
+  if (!stats) return false;
+
+  const fragmentCount = stats.project?.fragmentCount ?? 0;
+
+  if (projectId && fragmentCount > 0) {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}${fragmentCount} memories for ${ANSI.bold}${projectId}${ANSI.reset}`);
+  } else if (projectId) {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}Ready for ${ANSI.bold}${projectId}${ANSI.reset} (no memories yet)`);
+  } else {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}Session started`);
+  }
+
+  const restoration = await requestDaemonRestore({
+    projectId,
+    messageCount: config.restoration.messageCount,
+    tokenBudget: config.restoration.tokenBudget,
+  });
+
+  const awareness = buildAwarenessContext(config);
+  const hasRestoration = restoration?.hasContent ?? false;
+
+  if (hasRestoration || awareness) {
+    console.log('');
+    console.log(`${ANSI.dim}--- Restoration Context ---${ANSI.reset}`);
+    if (awareness) {
+      console.log(awareness);
+      if (hasRestoration) console.log('');
+    }
+    if (hasRestoration && restoration) {
+      console.log(restoration.formatted);
+    }
+    console.log(`${ANSI.dim}---------------------------${ANSI.reset}`);
+  }
+
+  return true;
+}
+
+/**
  * Handle Session End Hook
  */
 async function handleSessionEnd() {
@@ -486,11 +589,28 @@ async function handleSessionEnd() {
     return;
   }
 
-  const db = await initDb();
   const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
 
   // Always save before session ends
   console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}Saving session before exit...`);
+
+  // Daemon mode: archive through the shared daemon (hook timeout is 30s)
+  if (config.daemon.enabled && (await ensureDaemon(5000))) {
+    const result = await requestDaemonArchive({
+      transcriptPath: stdin.transcript_path,
+      projectId,
+      timeoutMs: 20000,
+    });
+    if (result) {
+      if (result.archived > 0) {
+        console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.green}Saved ${result.archived} memories`);
+      }
+      return;
+    }
+    // Daemon call failed: fall through to local archive
+  }
+
+  const db = await initDb();
   const result = await archiveSession(db, stdin.transcript_path, projectId);
 
   if (result.archived > 0) {
@@ -514,7 +634,25 @@ async function handlePostTool() {
 
     // Check if we should save based on step increase
     if (shouldAutoSave(currentPercent, stdin.transcript_path)) {
-      await performAutosave(stdin, 'context step');
+      if (config.daemon.enabled) {
+        // Daemon mode: queue on the shared daemon (fast 202 ack) - this
+        // hook has a 2s timeout and must never load the DB or model
+        setSavingState(true, stdin.transcript_path);
+        const queued = await requestDaemonArchive({
+          transcriptPath: stdin.transcript_path,
+          projectId: stdin.cwd ? getProjectId(stdin.cwd) : null,
+          contextPercent: currentPercent,
+          markAutoSave: true,
+          async: true,
+          timeoutMs: 800,
+        });
+        if (!queued) {
+          setSavingState(false, null);
+          spawnDaemonDetached();
+        }
+      } else {
+        await performAutosave(stdin, 'context step');
+      }
     }
   }
 }
@@ -547,67 +685,8 @@ async function performAutosave(stdin: StdinData, trigger: string) {
   }
 }
 
-// Legacy handlers removed: handleMonitor, handleClearReminder, handleContextCheck
-
-/**
- * Smart compaction handler
- * Saves context, clears, and provides restoration context
- */
-async function handleSmartCompact() {
-  debugLog('handleSmartCompact', 'Hook invoked');
-  const stdin = await readStdin();
-  debugLog('handleSmartCompact', 'Stdin received', { hasStdin: !!stdin, cwd: stdin?.cwd, transcriptPath: stdin?.transcript_path });
-  const config = loadConfig();
-
-  if (!stdin?.transcript_path) {
-    debugLog('handleSmartCompact', 'No transcript path - aborting');
-    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.red}No transcript available for compaction`);
-    return;
-  }
-
-  const db = await initDb();
-  const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
-  const contextPercent = getContextPercent(stdin);
-
-  // 1. Save current session
-  console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}Smart compaction starting...`);
-
-  const result = await archiveSession(db, stdin.transcript_path, projectId, {
-    onProgress: (current, total) => {
-      process.stdout.write(`\r${ANSI.brick}Ψ${ANSI.reset} ${ANSI.dim}Archiving ${current}/${total}...${ANSI.reset}`);
-    },
-  });
-
-  console.log(''); // Clear progress line
-
-  if (result.archived > 0) {
-    recordSavePoint(contextPercent, result.archived);
-    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.green}Archived ${result.archived} fragments`);
-  }
-
-  // 2. Build restoration context
-  const restoration = await buildRestorationContext(db, projectId, {
-    messageCount: config.restoration.messageCount,
-    tokenBudget: config.restoration.tokenBudget,
-  });
-
-  // 3. Record the clear
-  recordClear();
-
-  // 4. Output restoration context for Claude to see after clear
-  const awareness = buildAwarenessContext(config);
-
-  console.log('');
-  console.log(`${ANSI.cyan}=== Restoration Context ===${ANSI.reset}`);
-  if (awareness) {
-    console.log(awareness);
-    if (restoration.hasContent) console.log('');
-  }
-  console.log(formatRestorationContext(restoration));
-  console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
-  console.log('');
-  console.log(`${ANSI.dim}Context saved and ready for clear. Use /clear to proceed.${ANSI.reset}`);
-}
+// Legacy handlers removed: handleMonitor, handleClearReminder, handleContextCheck,
+// handleSmartCompact (the 'smart-compact' command routes to handlePreCompact)
 
 async function handleBackgroundSave(args: string[]) {
   // Parse args manually since we can't read stdin
@@ -666,10 +745,51 @@ async function handlePreCompact() {
     return;
   }
 
-  const db = await initDb();
   const projectId = config.archive.projectScope && stdin.cwd
     ? getProjectId(stdin.cwd)
     : null;
+
+  // Daemon mode: archive + restoration through the shared daemon
+  // (hook timeout is 60s; fall back to local mode if the daemon fails)
+  if (config.daemon.enabled && (await ensureDaemon(5000))) {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} Auto-archiving before compact...`);
+    const result = await requestDaemonArchive({
+      transcriptPath: stdin.transcript_path,
+      projectId,
+      contextPercent: getContextPercent(stdin),
+      timeoutMs: 45000,
+    });
+
+    if (result) {
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} Archived ${result.archived} fragments (${result.duplicates} duplicates skipped)`);
+
+      const restoration = await requestDaemonRestore({
+        projectId,
+        messageCount: config.restoration.messageCount,
+        tokenBudget: config.restoration.tokenBudget,
+      });
+
+      const awareness = buildAwarenessContext(config);
+      const hasRestoration = restoration?.hasContent ?? false;
+
+      if (hasRestoration || awareness) {
+        console.log('');
+        console.log(`${ANSI.cyan}=== Restoration Context ===${ANSI.reset}`);
+        if (awareness) {
+          console.log(awareness);
+          if (hasRestoration) console.log('');
+        }
+        if (hasRestoration && restoration) {
+          console.log(restoration.formatted);
+        }
+        console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
+      }
+      return;
+    }
+    // Daemon call failed: fall through to local archive
+  }
+
+  const db = await initDb();
 
   console.log(`${ANSI.brick}Ψ${ANSI.reset} Auto-archiving before compact...`);
 
@@ -833,7 +953,7 @@ async function handleStats() {
   console.log(lines.join('\n'));
 }
 
-async function handleSetup() {
+async function handleSetup(setupArgs: string[] = []) {
   console.log(`${ANSI.brick}Ψ${ANSI.reset} Setting up Cortex...`);
 
   // Ensure data directory exists
@@ -912,6 +1032,24 @@ async function handleSetup() {
     console.log(`     "statusLine": { "type": "command", "command": "node ${pluginRoot}/dist/index.js statusline" }`);
   }
 
+  // Optional shared daemon mode (one DB + one model for ALL sessions)
+  if (setupArgs.includes('--daemon')) {
+    const current = loadConfig();
+    updateConfig({ daemon: { ...current.daemon, enabled: true } });
+    console.log('  ⏳ Enabling shared daemon mode (single DB + model for all sessions)...');
+    const daemonReady = await ensureDaemon();
+    if (daemonReady) {
+      console.log('  ✓ Daemon running');
+    } else {
+      console.log('  ⚠ Daemon could not be started - sessions will fall back to local mode');
+    }
+  } else {
+    console.log('');
+    console.log(`${ANSI.dim}Tip: running many Claude Code sessions? Enable shared daemon mode so they${ANSI.reset}`);
+    console.log(`${ANSI.dim}all share ONE database + embedding model (large RAM/disk savings):${ANSI.reset}`);
+    console.log(`${ANSI.dim}  /cortex-configure daemon on   (or: node dist/index.js configure daemon on)${ANSI.reset}`);
+  }
+
   // Mark setup as complete
   markSetupComplete();
   console.log('  ✓ Setup marked complete');
@@ -937,6 +1075,33 @@ async function handleSetup() {
 }
 
 async function handleConfigure(args: string[]) {
+  // Daemon (shared server) mode toggle: configure daemon on|off|status
+  if (args[0] === 'daemon') {
+    const action = args[1];
+    const current = loadConfig();
+
+    if (action === 'on' || action === 'enable') {
+      updateConfig({ daemon: { ...current.daemon, enabled: true } });
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} Daemon mode ${ANSI.green}enabled${ANSI.reset} (shared server on 127.0.0.1:${current.daemon.port})`);
+      const ready = await ensureDaemon();
+      console.log(ready ? '  ✓ Daemon started' : '  ⚠ Daemon could not be started (will retry on next session)');
+      console.log('  Restart Claude Code sessions to route memory tools through the daemon.');
+    } else if (action === 'off' || action === 'disable') {
+      updateConfig({ daemon: { ...current.daemon, enabled: false } });
+      await stopDaemon();
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} Daemon mode ${ANSI.yellow}disabled${ANSI.reset} (classic per-process mode)`);
+      console.log('  Restart Claude Code sessions to apply.');
+    } else {
+      const health = await getDaemonHealth();
+      console.log(`Daemon mode:    ${current.daemon.enabled ? 'enabled' : 'disabled'} (port ${current.daemon.port})`);
+      console.log(`Daemon process: ${health ? `running v${health.version} (pid ${health.pid}, up ${health.uptime}s)` : 'not running'}`);
+      if (health && health.version !== VERSION) {
+        console.log(`${ANSI.yellow}Note: daemon is v${health.version} but plugin is v${VERSION} - it will be replaced on next use.${ANSI.reset}`);
+      }
+    }
+    return;
+  }
+
   const preset = args[0] as ConfigPreset | undefined;
 
   if (preset && ['full', 'essential', 'minimal'].includes(preset)) {
@@ -951,11 +1116,17 @@ async function handleConfigure(args: string[]) {
   }
 
   console.log('Usage: cortex configure <preset>');
+  console.log('       cortex configure daemon on|off|status');
   console.log('');
   console.log('Presets:');
   console.log('  full      - All features enabled (statusline, auto-archive, auto-save)');
   console.log('  essential - Statusline + auto-archive only');
   console.log('  minimal   - Commands only (no hooks/statusline)');
+  console.log('');
+  console.log('Daemon mode:');
+  console.log('  daemon on     - Share ONE database + embedding model across all sessions');
+  console.log('  daemon off    - Classic per-process mode (default)');
+  console.log('  daemon status - Show daemon mode config and process state');
 }
 
 async function handleTestEmbed(text: string) {
@@ -970,6 +1141,52 @@ async function handleTestEmbed(text: string) {
   } else {
     console.log(`  ✗ Error: ${result.error}`);
   }
+}
+
+// ============================================================================
+// Daemon Commands
+// ============================================================================
+
+async function handleEnsureDaemon() {
+  const config = loadConfig();
+  if (!config.daemon.enabled) {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} Daemon mode is disabled. Enable with: configure daemon on`);
+    return;
+  }
+
+  const ready = await ensureDaemon();
+  if (ready) {
+    const health = await getDaemonHealth();
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.green}Daemon running${ANSI.reset} v${health?.version} (pid ${health?.pid}, port ${health?.port})`);
+  } else {
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.red}Failed to start daemon${ANSI.reset}`);
+    process.exitCode = 1;
+  }
+}
+
+async function handleDaemonStatus() {
+  const config = loadConfig();
+  const health = await getDaemonHealth();
+
+  console.log(`${ANSI.brick}Ψ${ANSI.reset} Cortex Daemon`);
+  console.log(`  Mode:    ${config.daemon.enabled ? `${ANSI.green}enabled${ANSI.reset}` : 'disabled'} (port ${config.daemon.port})`);
+  if (health) {
+    console.log(`  Process: running v${health.version} (pid ${health.pid}, up ${health.uptime}s)`);
+    if (health.version !== VERSION) {
+      console.log(`  ${ANSI.yellow}⚠ Daemon is v${health.version}, plugin is v${VERSION} - it will be auto-replaced on next use${ANSI.reset}`);
+    }
+  } else {
+    console.log('  Process: not running');
+  }
+}
+
+async function handleDaemonStop() {
+  const requested = await stopDaemon();
+  console.log(
+    requested
+      ? `${ANSI.brick}Ψ${ANSI.reset} Daemon stop requested`
+      : `${ANSI.brick}Ψ${ANSI.reset} Daemon not running`
+  );
 }
 
 async function handleCheckDb() {

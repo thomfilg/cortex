@@ -562,16 +562,16 @@ var require_sql_wasm = __commonJS({
           throw b;
         }, D = "", Ea, Fa;
         if (ca) {
-          var fs6 = __require("fs");
+          var fs7 = __require("fs");
           __require("path");
           D = __dirname + "/";
           Fa = (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs6.readFileSync(a);
+            return fs7.readFileSync(a);
           };
           Ea = async (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs6.readFileSync(a, void 0);
+            return fs7.readFileSync(a, void 0);
           };
           !f.thisProgram && 1 < process.argv.length && (Ca = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -898,7 +898,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs6.readSync(d, b, 0, 256);
+                  c = fs7.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2361,114 +2361,14 @@ var require_sql_wasm = __commonJS({
   }
 });
 
-// src/stdin.ts
-async function readStdinWithResult() {
-  if (process.stdin.isTTY) {
-    return {
-      success: false,
-      data: null,
-      error: {
-        type: "tty",
-        message: "stdin is a TTY (interactive terminal)"
-      }
-    };
-  }
-  const chunks = [];
-  let raw = "";
-  try {
-    process.stdin.setEncoding("utf8");
-    for await (const chunk of process.stdin) {
-      chunks.push(chunk);
-    }
-    raw = chunks.join("");
-    if (!raw.trim()) {
-      return {
-        success: false,
-        data: null,
-        error: {
-          type: "empty",
-          message: "stdin was empty or whitespace only"
-        }
-      };
-    }
-    const data = JSON.parse(raw);
-    return {
-      success: true,
-      data
-    };
-  } catch (error) {
-    return {
-      success: false,
-      data: null,
-      error: {
-        type: "parse_error",
-        message: error instanceof Error ? error.message : String(error),
-        raw: raw.length < 500 ? raw : raw.substring(0, 500) + "..."
-      }
-    };
-  }
-}
-async function readStdin() {
-  const result = await readStdinWithResult();
-  return result.success ? result.data : null;
-}
-function getTotalTokens(stdin) {
-  const usage = stdin.context_window?.current_usage;
-  return (usage?.input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0);
-}
-function getNativePercent(stdin) {
-  const nativePercent = stdin.context_window?.used_percentage;
-  if (typeof nativePercent === "number" && !Number.isNaN(nativePercent)) {
-    return Math.min(100, Math.max(0, Math.round(nativePercent)));
-  }
-  return null;
-}
-function getContextPercent(stdin) {
-  const native = getNativePercent(stdin);
-  if (native !== null) {
-    return native;
-  }
-  const size = stdin.context_window?.context_window_size;
-  if (!size || size <= 0) {
-    return 0;
-  }
-  const totalTokens = getTotalTokens(stdin);
-  return Math.min(100, Math.round(totalTokens / size * 100));
-}
-function getProjectId(cwd) {
-  if (!cwd)
-    return "unknown";
-  const normalized = cwd.replace(/\\/g, "/");
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] || "unknown";
-}
-function formatDuration(date) {
-  const now = /* @__PURE__ */ new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 6e4);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffMins < 1)
-    return "now";
-  if (diffMins < 60)
-    return `${diffMins}m ago`;
-  if (diffHours < 24)
-    return `${diffHours}h ago`;
-  if (diffDays < 7)
-    return `${diffDays}d ago`;
-  return date.toLocaleDateString();
-}
-function formatCompactNumber(n) {
-  if (n < 1e3)
-    return String(n);
-  if (n < 1e6)
-    return `${(n / 1e3).toFixed(1)}K`;
-  if (n < 1e9)
-    return `${(n / 1e6).toFixed(1)}M`;
-  if (n < 1e12)
-    return `${(n / 1e9).toFixed(1)}B`;
-  return `${(n / 1e12).toFixed(1)}T`;
-}
+// src/daemon.ts
+import * as http from "http";
+import * as fs6 from "fs";
+
+// src/database.ts
+var import_sql = __toESM(require_sql_wasm(), 1);
+import * as fs2 from "fs";
+import * as os2 from "os";
 
 // src/config.ts
 import * as fs from "fs";
@@ -6710,106 +6610,6 @@ function atomicWriteFileSync(filePath, content) {
     throw error;
   }
 }
-function saveConfig(config) {
-  ensureDataDir();
-  const configPath = getConfigPath();
-  atomicWriteFileSync(configPath, JSON.stringify(config, null, 2));
-}
-function updateConfig(updates) {
-  const current = loadConfig();
-  const updated = deepMerge(current, updates);
-  saveConfig(updated);
-  return updated;
-}
-var CONFIG_PRESETS = {
-  full: {
-    statusline: {
-      enabled: true,
-      showFragments: true,
-      showLastArchive: true,
-      showContext: true
-    },
-    archive: {
-      projectScope: true,
-      minContentLength: 50
-    },
-    autosave: {
-      onSessionEnd: true,
-      onPreCompact: true,
-      contextStep: {
-        enabled: true,
-        step: 5
-      }
-    },
-    restoration: {
-      tokenBudget: 3e3,
-      messageCount: 5,
-      turnCount: 5
-    },
-    awareness: {
-      enabled: true,
-      userName: null,
-      timezone: null
-    }
-  },
-  essential: {
-    statusline: {
-      enabled: true,
-      showFragments: true,
-      showLastArchive: false,
-      showContext: true
-    },
-    archive: {
-      projectScope: true,
-      minContentLength: 100
-    },
-    autosave: {
-      onSessionEnd: true,
-      onPreCompact: true,
-      contextStep: {
-        enabled: true,
-        step: 10
-      }
-    },
-    restoration: {
-      tokenBudget: 1500,
-      messageCount: 5,
-      turnCount: 3
-    }
-  },
-  minimal: {
-    statusline: {
-      enabled: false,
-      showFragments: false,
-      showLastArchive: false,
-      showContext: false
-    },
-    archive: {
-      projectScope: true,
-      minContentLength: 50
-    },
-    autosave: {
-      onSessionEnd: true,
-      onPreCompact: true,
-      contextStep: {
-        enabled: false,
-        step: 20
-      }
-    },
-    restoration: {
-      tokenBudget: 1e3,
-      messageCount: 3,
-      turnCount: 2
-    }
-  }
-};
-function applyPreset(preset) {
-  const currentConfig = loadConfig();
-  const presetConfig = CONFIG_PRESETS[preset];
-  const config = deepMerge(currentConfig, presetConfig);
-  saveConfig(config);
-  return config;
-}
 function getAnalyticsPath() {
   return path.join(getDataDir(), "analytics.json");
 }
@@ -6828,27 +6628,28 @@ function loadSessions() {
     return {};
   }
 }
-function saveSessions(sessions) {
-  ensureDataDir();
-  atomicWriteFileSync(getSessionsPath(), JSON.stringify(sessions, null, 2));
-}
 var GLOBAL_SESSION_KEY = "_global";
-function saveCurrentSession(transcriptPath, projectId) {
-  const key = projectId || GLOBAL_SESSION_KEY;
+function getCurrentSession(projectId) {
   const sessions = loadSessions();
-  sessions[key] = {
-    transcriptPath,
-    projectId: projectId || GLOBAL_SESSION_KEY,
-    savedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  saveSessions(sessions);
+  if (projectId && sessions[projectId]) {
+    return sessions[projectId];
+  }
+  return sessions[GLOBAL_SESSION_KEY] || null;
 }
-function markSetupComplete() {
-  const config = loadConfig();
-  config.setup.completed = true;
-  config.setup.completedAt = (/* @__PURE__ */ new Date()).toISOString();
-  saveConfig(config);
-  return config;
+function getMostRecentSession() {
+  const sessions = loadSessions();
+  let mostRecent = null;
+  let mostRecentTime = 0;
+  for (const [key, session] of Object.entries(sessions)) {
+    if (key === GLOBAL_SESSION_KEY)
+      continue;
+    const savedTime = new Date(session.savedAt).getTime();
+    if (savedTime > mostRecentTime) {
+      mostRecentTime = savedTime;
+      mostRecent = session;
+    }
+  }
+  return mostRecent;
 }
 var DEFAULT_AUTO_SAVE_STATE = {
   lastSaveTimestamp: 0,
@@ -6878,17 +6679,6 @@ function saveAutoSaveState(state) {
   ensureDataDir();
   atomicWriteFileSync(getAutoSaveStatePath(), JSON.stringify(state, null, 2));
 }
-function shouldAutoSave(currentContext, transcriptPath) {
-  if (!transcriptPath)
-    return false;
-  const state = loadAutoSaveState();
-  const config = loadConfig();
-  if (state.transcriptPath !== transcriptPath) {
-    return currentContext >= config.autosave.contextStep.step;
-  }
-  const diff = currentContext - state.lastSaveContext;
-  return diff >= config.autosave.contextStep.step;
-}
 function markAutoSaved(transcriptPath, contextPercent, fragments) {
   const oldState = loadAutoSaveState();
   const state = {
@@ -6903,272 +6693,8 @@ function markAutoSaved(transcriptPath, contextPercent, fragments) {
   };
   saveAutoSaveState(state);
 }
-function setSavingState(isSaving2, transcriptPath) {
-  const state = loadAutoSaveState();
-  state.isSaving = isSaving2;
-  if (isSaving2) {
-    state.saveStartTime = Date.now();
-    state.savingDisplayUntil = Date.now() + 1e3;
-    state.transcriptPath = transcriptPath;
-  } else {
-    state.saveStartTime = 0;
-  }
-  saveAutoSaveState(state);
-}
-function isShowingSavingIndicator() {
-  const state = loadAutoSaveState();
-  const now = Date.now();
-  if (state.isSaving && now - state.saveStartTime < 6e4) {
-    return true;
-  }
-  if (state.savingDisplayUntil > 0 && now < state.savingDisplayUntil) {
-    return true;
-  }
-  return false;
-}
-function wasRecentlySaved(windowMs = 5e3) {
-  const state = loadAutoSaveState();
-  if (state.lastSaveTimestamp === 0)
-    return false;
-  if (isShowingSavingIndicator())
-    return false;
-  const elapsed = Date.now() - state.lastSaveTimestamp;
-  return elapsed < windowMs;
-}
-function getLastSaveTimeAgo(transcriptPath) {
-  const state = loadAutoSaveState();
-  if (!transcriptPath || state.transcriptPath !== transcriptPath) {
-    return null;
-  }
-  if (state.lastSaveTimestamp === 0)
-    return null;
-  const elapsed = Date.now() - state.lastSaveTimestamp;
-  if (elapsed < 5e3)
-    return null;
-  const seconds = Math.floor(elapsed / 1e3);
-  if (seconds < 60)
-    return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60)
-    return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h`;
-}
-function resetAutoSaveState() {
-  saveAutoSaveState({ ...DEFAULT_AUTO_SAVE_STATE });
-}
-function getChainedStatuslineCommand() {
-  const config = loadConfig();
-  return config.statusline.chainedCommand;
-}
-function buildCortexStatuslineCommand(pluginRoot) {
-  return `node ${pluginRoot}/dist/index.js statusline`;
-}
-function isCortexStatusline(command) {
-  return command.includes("index.js statusline");
-}
-function configureClaudeStatusline(settingsPath, pluginRoot, options = {}) {
-  const { force = false, chain = true } = options;
-  const cortexCommand = buildCortexStatuslineCommand(pluginRoot);
-  let settings = {};
-  const settingsDir = path.dirname(settingsPath);
-  if (!fs.existsSync(settingsDir)) {
-    fs.mkdirSync(settingsDir, { recursive: true });
-  }
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    } catch {
-      settings = {};
-    }
-  }
-  const existingStatusline = settings.statusLine;
-  if (existingStatusline?.command && !force) {
-    const existingCommand = existingStatusline.command || "";
-    if (!isCortexStatusline(existingCommand)) {
-      if (chain) {
-        const cortexConfig = loadConfig();
-        cortexConfig.statusline.chainedCommand = existingCommand;
-        saveConfig(cortexConfig);
-        settings.statusLine = {
-          type: "command",
-          command: cortexCommand
-        };
-        atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2));
-        return {
-          configured: true,
-          skipped: false,
-          chained: true,
-          chainedCommand: existingCommand
-        };
-      } else {
-        return {
-          configured: false,
-          skipped: true,
-          existingCommand
-        };
-      }
-    }
-  }
-  settings.statusLine = {
-    type: "command",
-    command: cortexCommand
-  };
-  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  return {
-    configured: true,
-    skipped: false,
-    chained: false
-  };
-}
-
-// src/daemon-client.ts
-import { spawn } from "child_process";
-import * as fs2 from "fs";
-
-// src/version.ts
-var VERSION = "2.1.4" ? "2.1.4" : "0.0.0-dev";
-
-// src/daemon-client.ts
-function getDaemonBaseUrl() {
-  return `http://127.0.0.1:${getDaemonPort()}`;
-}
-async function daemonFetch(path3, options = {}) {
-  const { method = "GET", body, timeoutMs = 1e3 } = options;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
-      method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
-      body: body !== void 0 ? JSON.stringify(body) : void 0,
-      signal: controller.signal
-    });
-    if (!response.ok && response.status !== 202) {
-      const errBody = await response.text().catch(() => "");
-      throw new Error(
-        `Daemon responded ${response.status} for ${path3}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
-      );
-    }
-    const text = await response.text();
-    return text ? JSON.parse(text) : {};
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function getDaemonHealth(timeoutMs = 500) {
-  try {
-    const health = await daemonFetch("/health", { timeoutMs });
-    return health;
-  } catch {
-    return null;
-  }
-}
-function getDaemonScriptPath() {
-  return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
-}
-function spawnDaemonDetached() {
-  try {
-    const daemonPath = getDaemonScriptPath();
-    if (!fs2.existsSync(daemonPath)) {
-      return false;
-    }
-    const child = spawn(process.execPath, [daemonPath], {
-      detached: true,
-      stdio: "ignore",
-      env: process.env
-    });
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function stopDaemon() {
-  let requested = false;
-  try {
-    await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
-    requested = true;
-  } catch {
-    try {
-      const infoPath = getDaemonInfoPath();
-      if (fs2.existsSync(infoPath)) {
-        const info = JSON.parse(fs2.readFileSync(infoPath, "utf8"));
-        if (info.pid) {
-          process.kill(info.pid, "SIGTERM");
-          requested = true;
-        }
-      }
-    } catch {
-    }
-  }
-  return requested;
-}
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function ensureDaemon(waitMs = 1e4) {
-  const health = await getDaemonHealth();
-  if (health && health.version === VERSION) {
-    return true;
-  }
-  if (health && health.version !== VERSION) {
-    await stopDaemon();
-    const shutdownDeadline = Date.now() + 3e3;
-    while (Date.now() < shutdownDeadline) {
-      if (!await getDaemonHealth(300))
-        break;
-      await delay(150);
-    }
-  }
-  if (!spawnDaemonDetached()) {
-    return false;
-  }
-  const deadline = Date.now() + waitMs;
-  while (Date.now() < deadline) {
-    const current = await getDaemonHealth(400);
-    if (current && current.version === VERSION) {
-      return true;
-    }
-    await delay(200);
-  }
-  return false;
-}
-async function getDaemonStats(projectId, timeoutMs = 400) {
-  try {
-    const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-    const stats = await daemonFetch(`/stats${query}`, { timeoutMs });
-    return stats;
-  } catch {
-    return null;
-  }
-}
-async function requestDaemonArchive(params) {
-  const { timeoutMs = params.async ? 1500 : 55e3, ...body } = params;
-  try {
-    const result = await daemonFetch("/archive", { method: "POST", body, timeoutMs });
-    return result;
-  } catch {
-    return null;
-  }
-}
-async function requestDaemonRestore(params) {
-  const { timeoutMs = 8e3, ...body } = params;
-  try {
-    const result = await daemonFetch("/restore", { method: "POST", body, timeoutMs });
-    return result;
-  } catch {
-    return null;
-  }
-}
-
-// src/index.ts
-import { spawn as spawn2, execSync } from "child_process";
 
 // src/database.ts
-var import_sql = __toESM(require_sql_wasm(), 1);
-import * as fs3 from "fs";
-import * as os2 from "os";
 import * as path2 from "path";
 import * as crypto2 from "crypto";
 var dbInstance = null;
@@ -7179,7 +6705,7 @@ var activeTempPath = null;
 function cleanupOrphanedTempFiles() {
   const dataDir = path2.dirname(getDatabasePath());
   try {
-    const files = fs3.readdirSync(dataDir);
+    const files = fs2.readdirSync(dataDir);
     const currentPid = process.pid;
     for (const file of files) {
       const match = file.match(/\.tmp\.(\d+)\.\d+$/);
@@ -7192,7 +6718,7 @@ function cleanupOrphanedTempFiles() {
         process.kill(filePid, 0);
       } catch {
         try {
-          fs3.unlinkSync(path2.join(dataDir, file));
+          fs2.unlinkSync(path2.join(dataDir, file));
         } catch {
         }
       }
@@ -7203,7 +6729,7 @@ function cleanupOrphanedTempFiles() {
 function cleanupAllTempFiles() {
   if (activeTempPath) {
     try {
-      fs3.unlinkSync(activeTempPath);
+      fs2.unlinkSync(activeTempPath);
     } catch {
     }
     activeTempPath = null;
@@ -7233,11 +6759,11 @@ async function initDb() {
       const dbPath = getDatabasePath();
       cleanupOrphanedTempFiles();
       createBackupOnStartup();
-      if (fs3.existsSync(dbPath)) {
+      if (fs2.existsSync(dbPath)) {
         let loadedDb = null;
         let needsRecovery = false;
         try {
-          const buffer = fs3.readFileSync(dbPath);
+          const buffer = fs2.readFileSync(dbPath);
           loadedDb = new SQL.Database(buffer);
           const validation = validateDatabase(loadedDb);
           if (!validation.valid) {
@@ -7254,8 +6780,8 @@ async function initDb() {
             const data = loadedDb.export();
             const tempPath = `${dbPath}.tmp.${process.pid}.${Date.now()}`;
             activeTempPath = tempPath;
-            fs3.writeFileSync(tempPath, Buffer.from(data));
-            fs3.renameSync(tempPath, dbPath);
+            fs2.writeFileSync(tempPath, Buffer.from(data));
+            fs2.renameSync(tempPath, dbPath);
             activeTempPath = null;
           }
         }
@@ -7286,10 +6812,10 @@ async function initDb() {
 var MAX_BACKUPS = 5;
 function createBackupOnStartup() {
   const dbPath = getDatabasePath();
-  if (!fs3.existsSync(dbPath)) {
+  if (!fs2.existsSync(dbPath)) {
     return;
   }
-  const stats = fs3.statSync(dbPath);
+  const stats = fs2.statSync(dbPath);
   if (stats.size === 0) {
     return;
   }
@@ -7298,36 +6824,36 @@ function createBackupOnStartup() {
   const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const backupPath = path2.join(backupsDir, `memory.db.backup.${timestamp}`);
   try {
-    fs3.copyFileSync(dbPath, backupPath);
+    fs2.copyFileSync(dbPath, backupPath);
     rotateBackups();
   } catch {
   }
 }
 function rotateBackups() {
   const backupsDir = getBackupsDir();
-  if (!fs3.existsSync(backupsDir)) {
+  if (!fs2.existsSync(backupsDir)) {
     return;
   }
-  const files = fs3.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => ({
+  const files = fs2.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => ({
     name: f,
     path: path2.join(backupsDir, f),
-    mtime: fs3.statSync(path2.join(backupsDir, f)).mtime.getTime()
+    mtime: fs2.statSync(path2.join(backupsDir, f)).mtime.getTime()
   })).sort((a, b) => b.mtime - a.mtime);
   for (let i = MAX_BACKUPS; i < files.length; i++) {
     try {
-      fs3.unlinkSync(files[i].path);
+      fs2.unlinkSync(files[i].path);
     } catch {
     }
   }
 }
 function getBackupFiles() {
   const backupsDir = getBackupsDir();
-  if (!fs3.existsSync(backupsDir)) {
+  if (!fs2.existsSync(backupsDir)) {
     return [];
   }
-  return fs3.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => path2.join(backupsDir, f)).sort((a, b) => {
-    const aTime = fs3.statSync(a).mtime.getTime();
-    const bTime = fs3.statSync(b).mtime.getTime();
+  return fs2.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => path2.join(backupsDir, f)).sort((a, b) => {
+    const aTime = fs2.statSync(a).mtime.getTime();
+    const bTime = fs2.statSync(b).mtime.getTime();
     return bTime - aTime;
   });
 }
@@ -7400,7 +6926,7 @@ function attemptRecovery() {
   const backups = getBackupFiles();
   for (const backupPath of backups) {
     try {
-      const buffer = fs3.readFileSync(backupPath);
+      const buffer = fs2.readFileSync(backupPath);
       const db = new SQL.Database(buffer);
       const validation = validateDatabase(db);
       if (validation.valid) {
@@ -7513,14 +7039,14 @@ function saveDb(db) {
   const tempPath = `${dbPath}.tmp.${process.pid}.${Date.now()}`;
   try {
     activeTempPath = tempPath;
-    fs3.writeFileSync(tempPath, buffer);
-    fs3.renameSync(tempPath, dbPath);
+    fs2.writeFileSync(tempPath, buffer);
+    fs2.renameSync(tempPath, dbPath);
     activeTempPath = null;
   } catch (error) {
     activeTempPath = null;
     try {
-      if (fs3.existsSync(tempPath)) {
-        fs3.unlinkSync(tempPath);
+      if (fs2.existsSync(tempPath)) {
+        fs2.unlinkSync(tempPath);
       }
     } catch {
     }
@@ -7568,6 +7094,26 @@ function insertMemory(db, memory) {
   const id = result[0].values[0][0];
   return { id, isDuplicate: false };
 }
+function getMemory(db, id) {
+  const result = db.exec(
+    `SELECT id, content, content_hash, embedding, project_id, source_session, timestamp
+     FROM memories WHERE id = ?`,
+    [id]
+  );
+  if (result.length === 0 || result[0].values.length === 0) {
+    return null;
+  }
+  const row = result[0].values[0];
+  return {
+    id: row[0],
+    content: row[1],
+    contentHash: row[2],
+    embedding: bufferToEmbedding(row[3]),
+    projectId: row[4],
+    sourceSession: row[5],
+    timestamp: new Date(row[6])
+  };
+}
 function contentExists(db, content) {
   const hash = hashContent(content);
   const result = db.exec(
@@ -7575,6 +7121,45 @@ function contentExists(db, content) {
     [hash]
   );
   return result.length > 0 && result[0].values.length > 0;
+}
+function deleteMemory(db, id) {
+  db.run(`DELETE FROM memories WHERE id = ?`, [id]);
+  return db.getRowsModified() > 0;
+}
+function storeManualMemory(db, content, embedding, projectId, context) {
+  const fullContent = context ? `${content}
+
+[Context: ${context}]` : content;
+  const sessionId = `manual-${Date.now()}`;
+  return insertMemory(db, {
+    content: fullContent,
+    embedding,
+    projectId,
+    sourceSession: sessionId,
+    timestamp: /* @__PURE__ */ new Date()
+  });
+}
+function updateMemory(db, id, newContent, newEmbedding) {
+  const newHash = hashContent(newContent);
+  db.run(
+    `UPDATE memories SET content = ?, content_hash = ?, embedding = ? WHERE id = ?`,
+    [newContent, newHash, embeddingToBuffer(newEmbedding), id]
+  );
+  return db.getRowsModified() > 0;
+}
+function updateMemoryProjectId(db, id, newProjectId) {
+  db.run(
+    `UPDATE memories SET project_id = ? WHERE id = ?`,
+    [newProjectId, id]
+  );
+  return db.getRowsModified() > 0;
+}
+function renameProject(db, oldProjectId, newProjectId) {
+  db.run(
+    `UPDATE memories SET project_id = ? WHERE project_id = ?`,
+    [newProjectId, oldProjectId]
+  );
+  return db.getRowsModified();
 }
 function getRecentMemories(db, projectId, limit = 10) {
   let query = `SELECT id, content, project_id, timestamp FROM memories`;
@@ -7720,8 +7305,8 @@ function getStats(db) {
   const newestTimestamp = newestStr ? new Date(newestStr) : null;
   const dbPath = getDatabasePath();
   let dbSizeBytes = 0;
-  if (fs3.existsSync(dbPath)) {
-    dbSizeBytes = fs3.statSync(dbPath).size;
+  if (fs2.existsSync(dbPath)) {
+    dbSizeBytes = fs2.statSync(dbPath).size;
   }
   return {
     fragmentCount,
@@ -7731,6 +7316,21 @@ function getStats(db) {
     oldestTimestamp,
     newestTimestamp
   };
+}
+function listProjects(db) {
+  const result = db.exec(`
+    SELECT project_id, COUNT(*) as count
+    FROM memories
+    WHERE project_id IS NOT NULL
+    GROUP BY project_id
+    ORDER BY count DESC
+  `);
+  if (!result[0])
+    return [];
+  return result[0].values.map((row) => ({
+    projectId: row[0],
+    fragmentCount: row[1]
+  }));
 }
 function getProjectStats(db, projectId) {
   const fragmentResult = db.exec(
@@ -7863,14 +7463,6 @@ function cosineSimilarity(a, b) {
   }
   return dotProduct / denominator;
 }
-function formatBytes(bytes) {
-  if (bytes === 0)
-    return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const k = 1024;
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${units[i]}`;
-}
 
 // src/embeddings.ts
 var MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5";
@@ -7907,27 +7499,6 @@ async function initEmbedder() {
     }
   })();
   return initPromise2;
-}
-function getModelName() {
-  return MODEL_NAME;
-}
-async function embedPassages(texts) {
-  const pipe = await initEmbedder();
-  const prefixedTexts = texts.map((t) => PASSAGE_PREFIX + t);
-  const results = [];
-  for (const text of prefixedTexts) {
-    const output = await pipe(text, {
-      pooling: "mean",
-      normalize: true
-    });
-    const embedding = new Float32Array(output.data);
-    results.push(embedding);
-  }
-  return results;
-}
-async function embedPassage(text) {
-  const results = await embedPassages([text]);
-  return results[0];
 }
 async function embedQuery(text) {
   const pipe = await initEmbedder();
@@ -8013,24 +7584,6 @@ async function embedBatchWithResult(texts, options = {}) {
     }
   }
   return result;
-}
-async function verifyModel() {
-  try {
-    await initEmbedder();
-    const testEmbedding = await embedPassage("test");
-    return {
-      success: true,
-      model: MODEL_NAME,
-      dimensions: testEmbedding.length
-    };
-  } catch (error) {
-    return {
-      success: false,
-      model: MODEL_NAME,
-      dimensions: EMBEDDING_DIM,
-      error: error instanceof Error ? error.message : String(error)
-    };
-  }
 }
 
 // src/search.ts
@@ -8120,45 +7673,9 @@ function applyRecencyDecay(results) {
     };
   });
 }
-function formatSearchResults(results) {
-  if (results.length === 0) {
-    return "No matching memories found.";
-  }
-  const lines = [];
-  lines.push(`Found ${results.length} matching memories:
-`);
-  results.forEach((result, index) => {
-    const scorePercent = Math.round(result.score * 100);
-    const timeAgo = formatTimeAgo(result.timestamp);
-    const project = result.projectId ? `[${result.projectId}]` : "[global]";
-    const sourceLabel = result.source === "hybrid" ? "\u26A1" : result.source === "vector" ? "\u{1F3AF}" : "\u{1F524}";
-    lines.push(`${index + 1}. ${sourceLabel} ${project} (${scorePercent}% \u2022 ${timeAgo})`);
-    const maxLen = 200;
-    const content = result.content.length > maxLen ? result.content.substring(0, maxLen) + "..." : result.content;
-    lines.push(`   ${content}`);
-    lines.push("");
-  });
-  return lines.join("\n");
-}
-function formatTimeAgo(date) {
-  const now = Date.now();
-  const diff = now - date.getTime();
-  const minutes = Math.floor(diff / 6e4);
-  const hours = Math.floor(diff / 36e5);
-  const days = Math.floor(diff / 864e5);
-  if (minutes < 1)
-    return "just now";
-  if (minutes < 60)
-    return `${minutes}m ago`;
-  if (hours < 24)
-    return `${hours}h ago`;
-  if (days < 7)
-    return `${days}d ago`;
-  return date.toLocaleDateString();
-}
 
 // src/archive.ts
-import * as fs4 from "fs";
+import * as fs3 from "fs";
 import * as readline from "readline";
 
 // src/logger.ts
@@ -8267,10 +7784,10 @@ async function parseTranscript(transcriptPath, startLine = 0) {
       parseErrors: 0
     }
   };
-  if (!fs4.existsSync(transcriptPath)) {
+  if (!fs3.existsSync(transcriptPath)) {
     return result;
   }
-  const fileStream = fs4.createReadStream(transcriptPath);
+  const fileStream = fs3.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -8767,7 +8284,7 @@ function formatRestorationContext(context) {
   if (context.turns.length > 0) {
     lines.push("--- Recent Conversation ---");
     for (const turn of context.turns) {
-      const timeAgo = formatTimeAgo2(turn.timestamp);
+      const timeAgo = formatTimeAgo(turn.timestamp);
       const roleLabel = turn.role === "user" ? "User" : "Assistant";
       lines.push(`[${roleLabel}] (${timeAgo})`);
       lines.push(turn.content);
@@ -8778,7 +8295,7 @@ function formatRestorationContext(context) {
     lines.push("--- Related Memories ---");
     for (let i = 0; i < context.fragments.length; i++) {
       const fragment = context.fragments[i];
-      const timeAgo = formatTimeAgo2(fragment.timestamp);
+      const timeAgo = formatTimeAgo(fragment.timestamp);
       lines.push(`[${i + 1}] (${timeAgo})`);
       lines.push(fragment.content);
       lines.push("");
@@ -8787,7 +8304,7 @@ function formatRestorationContext(context) {
   lines.push(`~${context.estimatedTokens} tokens`);
   return lines.join("\n");
 }
-function formatTimeAgo2(date) {
+function formatTimeAgo(date) {
   const now = Date.now();
   const diff = now - date.getTime();
   const minutes = Math.floor(diff / 6e4);
@@ -8805,16 +8322,16 @@ function formatTimeAgo2(date) {
 }
 
 // src/analytics.ts
-import * as fs5 from "fs";
+import * as fs4 from "fs";
 var ANALYTICS_VERSION = 1;
 var MAX_SESSIONS_TO_KEEP = 100;
 function getAnalytics() {
   const analyticsPath = getAnalyticsPath();
-  if (!fs5.existsSync(analyticsPath)) {
+  if (!fs4.existsSync(analyticsPath)) {
     return createEmptyAnalytics();
   }
   try {
-    const content = fs5.readFileSync(analyticsPath, "utf8");
+    const content = fs4.readFileSync(analyticsPath, "utf8");
     const data = JSON.parse(content);
     if (data.version !== ANALYTICS_VERSION) {
       return migrateAnalytics(data);
@@ -8830,7 +8347,7 @@ function saveAnalytics(data) {
   if (data.sessions.length > MAX_SESSIONS_TO_KEEP) {
     data.sessions = data.sessions.slice(-MAX_SESSIONS_TO_KEEP);
   }
-  fs5.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
+  fs4.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
 }
 function createEmptyAnalytics() {
   return {
@@ -8841,39 +8358,6 @@ function createEmptyAnalytics() {
 }
 function migrateAnalytics(oldData) {
   return createEmptyAnalytics();
-}
-function startSession(projectId) {
-  const analytics = getAnalytics();
-  if (analytics.currentSession) {
-    endSession();
-  }
-  const session = {
-    sessionId: generateSessionId(),
-    projectId,
-    startTime: (/* @__PURE__ */ new Date()).toISOString(),
-    endTime: null,
-    peakContextPercent: 0,
-    savePoints: [],
-    clearCount: 0,
-    recallCount: 0,
-    fragmentsCreated: 0,
-    restorationUsed: false
-  };
-  analytics.currentSession = session;
-  saveAnalytics(analytics);
-  return session;
-}
-function endSession() {
-  const analytics = getAnalytics();
-  if (!analytics.currentSession) {
-    return null;
-  }
-  const session = analytics.currentSession;
-  session.endTime = (/* @__PURE__ */ new Date()).toISOString();
-  analytics.sessions.push(session);
-  analytics.currentSession = null;
-  saveAnalytics(analytics);
-  return session;
 }
 function recordSavePoint(contextPercent, fragmentsSaved) {
   const analytics = getAnalytics();
@@ -8889,979 +8373,994 @@ function recordSavePoint(contextPercent, fragmentsSaved) {
   analytics.currentSession.fragmentsCreated += fragmentsSaved;
   saveAnalytics(analytics);
 }
-function generateSessionId() {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 8);
-  return `${timestamp}-${random}`;
+function recordRemember(count = 1) {
+  const analytics = getAnalytics();
+  if (!analytics.currentSession) {
+    return;
+  }
+  analytics.currentSession.fragmentsCreated += count;
+  saveAnalytics(analytics);
+}
+function recordRecall() {
+  const analytics = getAnalytics();
+  if (!analytics.currentSession) {
+    return;
+  }
+  analytics.currentSession.recallCount++;
+  saveAnalytics(analytics);
+}
+function getAnalyticsSummary() {
+  const analytics = getAnalytics();
+  const sessions = analytics.sessions;
+  const oneWeekAgo = /* @__PURE__ */ new Date();
+  oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+  const thisWeekSessions = sessions.filter((s) => new Date(s.startTime) >= oneWeekAgo);
+  const allSavePoints = sessions.flatMap((s) => s.savePoints);
+  const avgContextAtSave = allSavePoints.length > 0 ? allSavePoints.reduce((sum, sp) => sum + sp.contextPercent, 0) / allSavePoints.length : 0;
+  const sessionsProlonged = sessions.filter((s) => s.savePoints.length > 0 && s.clearCount > 0).length;
+  return {
+    totalSessions: sessions.length,
+    totalFragments: sessions.reduce((sum, s) => sum + s.fragmentsCreated, 0),
+    averageContextAtSave: avgContextAtSave,
+    sessionsProlonged,
+    thisWeek: {
+      sessions: thisWeekSessions.length,
+      fragmentsCreated: thisWeekSessions.reduce((sum, s) => sum + s.fragmentsCreated, 0),
+      recallsUsed: thisWeekSessions.reduce((sum, s) => sum + s.recallCount, 0)
+    }
+  };
 }
 
-// src/index.ts
-import { appendFileSync, existsSync as existsSync6, mkdirSync as mkdirSync2 } from "fs";
-import { homedir as homedir2 } from "os";
-import { join as join3 } from "path";
-var ANSI = {
-  reset: "\x1B[0m",
-  bold: "\x1B[1m",
-  dim: "\x1B[2m",
-  green: "\x1B[38;2;72;150;140m",
-  yellow: "\x1B[33m",
-  red: "\x1B[31m",
-  cyan: "\x1B[36m",
-  gray: "\x1B[90m",
-  darkGray: "\x1B[38;5;240m",
-  // Darker grey for separators
-  brick: "\x1B[38;2;217;119;87m"
-  // Claude terracotta/brick #D97757
-};
-var DEBUG_ENABLED = process.env.CORTEX_DEBUG === "1" || process.env.CORTEX_DEBUG === "true";
-var DEBUG_LOG_DIR = join3(homedir2(), ".cortex", "logs");
-var DEBUG_LOG_FILE = join3(DEBUG_LOG_DIR, "hook-debug.log");
-function debugLog(context, message, data) {
-  if (!DEBUG_ENABLED)
-    return;
-  try {
-    if (!existsSync6(DEBUG_LOG_DIR)) {
-      mkdirSync2(DEBUG_LOG_DIR, { recursive: true });
+// src/version.ts
+var VERSION = "2.1.4" ? "2.1.4" : "0.0.0-dev";
+
+// src/tools.ts
+var TOOLS = [
+  {
+    name: "cortex_recall",
+    description: "Search Cortex memory for relevant past context. Use when referencing past work or needing historical context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query to find relevant memories"
+        },
+        limit: {
+          type: "number",
+          description: "Maximum number of results to return (default: 5)"
+        },
+        includeAllProjects: {
+          type: "boolean",
+          description: "Search across all projects instead of just the current one"
+        },
+        projectId: {
+          type: "string",
+          description: "Specific project ID to search within"
+        }
+      },
+      required: ["query"]
     }
-    const timestamp = (/* @__PURE__ */ new Date()).toISOString();
-    const logEntry = `[${timestamp}] [${context}] ${message}${data ? "\n  DATA: " + JSON.stringify(data, null, 2).replace(/\n/g, "\n  ") : ""}
-`;
-    appendFileSync(DEBUG_LOG_FILE, logEntry);
+  },
+  {
+    name: "cortex_remember",
+    description: "Save a specific insight, decision, or fact to memory. Use for important information worth preserving during the conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: "The content to remember (decision, insight, fact, etc.)"
+        },
+        context: {
+          type: "string",
+          description: "Optional context about why this is important"
+        },
+        projectId: {
+          type: "string",
+          description: "Project ID to associate with this memory"
+        }
+      },
+      required: ["content"]
+    }
+  },
+  {
+    name: "cortex_save",
+    description: "Archive the current session to Cortex memory. Use before clearing context or when context is high. Transcript path is auto-detected from current session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        transcriptPath: {
+          type: "string",
+          description: "Path to the transcript file (optional - auto-detected from current session)"
+        },
+        projectId: {
+          type: "string",
+          description: "Project ID to associate with the memories"
+        },
+        global: {
+          type: "boolean",
+          description: "Save as global memories (not project-specific)"
+        }
+      }
+    }
+  },
+  {
+    name: "cortex_archive",
+    description: "Archive the current session to Cortex memory (alias for cortex_save). Transcript path is auto-detected from current session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        transcriptPath: {
+          type: "string",
+          description: "Path to the transcript file (optional - auto-detected from current session)"
+        },
+        projectId: {
+          type: "string",
+          description: "Project ID to associate with the memories"
+        },
+        global: {
+          type: "boolean",
+          description: "Save as global memories (not project-specific)"
+        }
+      }
+    }
+  },
+  {
+    name: "cortex_stats",
+    description: "Get Cortex memory statistics including fragment count, project count, and database size.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          description: "Get stats for a specific project"
+        }
+      }
+    }
+  },
+  {
+    name: "cortex_restore",
+    description: "Get restoration context from recent session. Use after context clear to restore continuity.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          description: "Project ID to get restoration context for"
+        },
+        messageCount: {
+          type: "number",
+          description: "Number of recent memories to include (default: 5)"
+        }
+      }
+    }
+  },
+  {
+    name: "cortex_delete",
+    description: "Delete a specific memory fragment by ID. Requires confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: {
+          type: "number",
+          description: "The ID of the memory to delete"
+        },
+        confirm: {
+          type: "boolean",
+          description: "Set to true to confirm deletion"
+        }
+      },
+      required: ["memoryId"]
+    }
+  },
+  {
+    name: "cortex_update",
+    description: "Update a memory fragment. Can update content and/or move to different project.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memoryId: {
+          type: "number",
+          description: "The ID of the memory to update"
+        },
+        content: {
+          type: "string",
+          description: "New content for the memory (will re-generate embedding)"
+        },
+        projectId: {
+          type: "string",
+          description: "New project ID to move the memory to"
+        }
+      },
+      required: ["memoryId"]
+    }
+  },
+  {
+    name: "cortex_rename_project",
+    description: "Rename a project - moves all memories from old project ID to new project ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        oldProjectId: {
+          type: "string",
+          description: "The current project ID"
+        },
+        newProjectId: {
+          type: "string",
+          description: "The new project ID"
+        }
+      },
+      required: ["oldProjectId", "newProjectId"]
+    }
+  },
+  {
+    name: "cortex_forget_project",
+    description: "Delete all memories for a specific project. Requires confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: {
+          type: "string",
+          description: "The project ID to delete all memories for"
+        },
+        confirm: {
+          type: "boolean",
+          description: "Set to true to confirm deletion"
+        }
+      },
+      required: ["projectId"]
+    }
+  },
+  {
+    name: "cortex_analytics",
+    description: "Get session analytics and insights about Cortex usage patterns.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        detailed: {
+          type: "boolean",
+          description: "Include detailed session-by-session metrics"
+        }
+      }
+    }
+  }
+];
+async function handleRecall(db, params) {
+  const { query, limit = 5, includeAllProjects = false, projectId } = params;
+  const results = await hybridSearch(db, query, {
+    projectScope: !includeAllProjects,
+    projectId,
+    includeAllProjects,
+    limit
+  });
+  recordRecall();
+  return {
+    results: results.map((r) => ({
+      id: r.id,
+      content: r.content,
+      score: Math.round(r.score * 100) / 100,
+      source: r.source,
+      timestamp: r.timestamp.toISOString(),
+      projectId: r.projectId
+    })),
+    count: results.length,
+    query
+  };
+}
+async function handleRemember(db, params) {
+  const { content, context, projectId } = params;
+  if (!content || content.trim().length === 0) {
+    return {
+      success: false,
+      error: "Content is required"
+    };
+  }
+  const textToEmbed = context ? `${content} ${context}` : content;
+  const embedding = await embedQuery(textToEmbed);
+  const result = storeManualMemory(db, content, embedding, projectId || null, context);
+  if (result.isDuplicate) {
+    return {
+      success: true,
+      isDuplicate: true,
+      id: result.id,
+      message: "This content already exists in memory"
+    };
+  }
+  saveDb(db);
+  recordRemember();
+  return {
+    success: true,
+    id: result.id,
+    message: `Remembered: "${content.length > 50 ? content.substring(0, 50) + "..." : content}"`,
+    projectId: projectId || null
+  };
+}
+async function handleSave(db, params) {
+  let { transcriptPath, projectId } = params;
+  const { global = false } = params;
+  if (!transcriptPath) {
+    if (projectId) {
+      const currentSession = getCurrentSession(projectId);
+      if (currentSession) {
+        transcriptPath = currentSession.transcriptPath;
+      }
+    }
+    if (!transcriptPath) {
+      const recentSession = getMostRecentSession();
+      if (recentSession) {
+        transcriptPath = recentSession.transcriptPath;
+        projectId = projectId || recentSession.projectId;
+      }
+    }
+    if (!transcriptPath) {
+      return {
+        success: false,
+        error: "No active session found. Start a new Claude Code session first."
+      };
+    }
+  }
+  const effectiveProjectId = global ? null : projectId || null;
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  return {
+    success: true,
+    archived: result.archived,
+    skipped: result.skipped,
+    duplicates: result.duplicates,
+    projectId: effectiveProjectId,
+    transcriptPath
+  };
+}
+async function handleStats(db, params) {
+  const stats = getStats(db);
+  const projects = listProjects(db);
+  const result = {
+    totalFragments: stats.fragmentCount,
+    totalProjects: stats.projectCount,
+    totalSessions: stats.sessionCount,
+    dbSizeBytes: stats.dbSizeBytes,
+    oldestMemory: stats.oldestTimestamp?.toISOString() || null,
+    newestMemory: stats.newestTimestamp?.toISOString() || null,
+    dataDir: getDataDir(),
+    projects
+  };
+  if (params.projectId) {
+    const projectStats = getProjectStats(db, params.projectId);
+    result.project = {
+      id: params.projectId,
+      fragments: projectStats.fragmentCount,
+      sessions: projectStats.sessionCount,
+      lastArchive: projectStats.lastArchive?.toISOString() || null
+    };
+  }
+  return result;
+}
+async function handleRestore(db, params) {
+  const { projectId, messageCount = 5 } = params;
+  const config = loadConfig();
+  const queryEmbedding = await embedQuery("recent work context summary");
+  const results = searchByVector(db, queryEmbedding, projectId, messageCount);
+  if (results.length === 0) {
+    return {
+      hasContent: false,
+      summary: null,
+      fragments: []
+    };
+  }
+  const fragments = results.map((r) => ({
+    id: r.id,
+    content: r.content.length > 300 ? r.content.substring(0, 300) + "..." : r.content,
+    timestamp: r.timestamp.toISOString()
+  }));
+  const totalChars = fragments.reduce((sum, f) => sum + f.content.length, 0);
+  const estimatedTokens = Math.ceil(totalChars / 4);
+  return {
+    hasContent: true,
+    summary: `Found ${fragments.length} recent memories from ${projectId || "global"} context.`,
+    fragments,
+    estimatedTokens,
+    withinBudget: estimatedTokens <= config.restoration.tokenBudget
+  };
+}
+async function handleDelete(db, params) {
+  const { memoryId, confirm = false } = params;
+  const memory = getMemory(db, memoryId);
+  if (!memory) {
+    return {
+      error: "Memory not found",
+      memoryId
+    };
+  }
+  if (!confirm) {
+    return {
+      status: "confirmation_required",
+      action: "delete",
+      memoryId,
+      preview: memory.content.length > 200 ? memory.content.substring(0, 200) + "..." : memory.content,
+      projectId: memory.projectId,
+      timestamp: memory.timestamp.toISOString(),
+      message: "Call cortex_delete with confirm: true to delete this memory."
+    };
+  }
+  const deleted = deleteMemory(db, memoryId);
+  if (deleted) {
+    saveDb(db);
+  }
+  return {
+    success: deleted,
+    memoryId,
+    message: deleted ? "Memory deleted successfully." : "Failed to delete memory."
+  };
+}
+async function handleUpdate(db, params) {
+  const { memoryId, content, projectId } = params;
+  const memory = getMemory(db, memoryId);
+  if (!memory) {
+    return {
+      error: "Memory not found",
+      memoryId
+    };
+  }
+  if (!content && projectId === void 0) {
+    return {
+      error: "Nothing to update. Provide content and/or projectId.",
+      memoryId
+    };
+  }
+  const updates = [];
+  if (content && content.trim().length > 0) {
+    const embedding = await embedQuery(content);
+    const updated = updateMemory(db, memoryId, content, embedding);
+    if (updated) {
+      updates.push("content");
+    }
+  }
+  if (projectId !== void 0) {
+    const updated = updateMemoryProjectId(db, memoryId, projectId || null);
+    if (updated) {
+      updates.push("projectId");
+    }
+  }
+  if (updates.length > 0) {
+    saveDb(db);
+  }
+  return {
+    success: updates.length > 0,
+    memoryId,
+    updated: updates,
+    message: updates.length > 0 ? `Updated ${updates.join(" and ")} for memory ${memoryId}.` : "No changes made."
+  };
+}
+async function handleRenameProject(db, params) {
+  const { oldProjectId, newProjectId } = params;
+  if (!oldProjectId || !newProjectId) {
+    return {
+      error: "Both oldProjectId and newProjectId are required."
+    };
+  }
+  if (oldProjectId === newProjectId) {
+    return {
+      error: "Old and new project IDs are the same."
+    };
+  }
+  const projectStats = getProjectStats(db, oldProjectId);
+  if (projectStats.fragmentCount === 0) {
+    return {
+      error: "No memories found for this project",
+      projectId: oldProjectId
+    };
+  }
+  const count = renameProject(db, oldProjectId, newProjectId);
+  if (count > 0) {
+    saveDb(db);
+  }
+  return {
+    success: count > 0,
+    oldProjectId,
+    newProjectId,
+    memoriesMoved: count,
+    message: `Moved ${count} memories from "${oldProjectId}" to "${newProjectId}".`
+  };
+}
+async function handleForgetProject(db, params) {
+  const { projectId, confirm = false } = params;
+  const projectStats = getProjectStats(db, projectId);
+  if (projectStats.fragmentCount === 0) {
+    return {
+      error: "No memories found for this project",
+      projectId
+    };
+  }
+  if (!confirm) {
+    return {
+      status: "confirmation_required",
+      action: "forget_project",
+      projectId,
+      fragmentCount: projectStats.fragmentCount,
+      sessionCount: projectStats.sessionCount,
+      message: `This will delete ${projectStats.fragmentCount} memories from ${projectId}. Call cortex_forget_project with confirm: true to proceed.`
+    };
+  }
+  const result = db.exec(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+  const deletedCount = db.getRowsModified();
+  saveDb(db);
+  return {
+    success: true,
+    projectId,
+    deletedCount,
+    message: `Deleted ${deletedCount} memories from ${projectId}.`
+  };
+}
+async function handleAnalytics(params) {
+  const { detailed = false } = params;
+  const analytics = getAnalytics();
+  const summary = getAnalyticsSummary();
+  const result = {
+    summary: {
+      totalSessions: summary.totalSessions,
+      totalFragments: summary.totalFragments,
+      averageContextAtSave: `${Math.round(summary.averageContextAtSave)}%`,
+      sessionsProlonged: summary.sessionsProlonged
+    },
+    thisWeek: summary.thisWeek,
+    insights: generateInsights(summary),
+    recommendations: generateRecommendations(summary)
+  };
+  if (detailed && analytics.sessions.length > 0) {
+    result.recentSessions = analytics.sessions.slice(-10).map((s) => ({
+      sessionId: s.sessionId,
+      projectId: s.projectId,
+      startTime: s.startTime,
+      peakContext: `${s.peakContextPercent}%`,
+      fragmentsCreated: s.fragmentsCreated,
+      recallCount: s.recallCount
+    }));
+  }
+  return result;
+}
+function generateInsights(summary) {
+  const insights = [];
+  if (summary.averageContextAtSave > 0) {
+    const threshold = 70;
+    const diff = Math.abs(summary.averageContextAtSave - threshold);
+    if (diff < 5) {
+      insights.push(`Your average save happens at ${Math.round(summary.averageContextAtSave)}% - threshold is ${threshold}% (good match)`);
+    } else if (summary.averageContextAtSave > threshold) {
+      insights.push(`You typically save at ${Math.round(summary.averageContextAtSave)}% - consider lower context usage`);
+    }
+  }
+  if (summary.sessionsProlonged > 0) {
+    insights.push(`${summary.sessionsProlonged} sessions used smart compaction - avoided hitting 100% context`);
+  }
+  if (summary.thisWeek.recallsUsed > 5) {
+    insights.push(`Active recall usage this week (${summary.thisWeek.recallsUsed} queries) - memories are being utilized`);
+  }
+  return insights;
+}
+function generateRecommendations(summary) {
+  const recommendations = [];
+  if (summary.averageContextAtSave > 85) {
+    recommendations.push("Your context often gets very high before saving - consider using /save more frequently");
+  }
+  return recommendations;
+}
+function makeInitializeResult() {
+  return {
+    protocolVersion: "2024-11-05",
+    capabilities: {
+      tools: {}
+    },
+    serverInfo: {
+      name: "cortex-memory",
+      version: VERSION
+    }
+  };
+}
+async function callTool(db, name, args) {
+  switch (name) {
+    case "cortex_recall":
+      return handleRecall(db, args);
+    case "cortex_remember":
+      return handleRemember(db, args);
+    case "cortex_save":
+    case "cortex_archive":
+      return handleSave(db, args);
+    case "cortex_stats":
+      return handleStats(db, args);
+    case "cortex_restore":
+      return handleRestore(db, args);
+    case "cortex_delete":
+      return handleDelete(db, args);
+    case "cortex_update":
+      return handleUpdate(db, args);
+    case "cortex_rename_project":
+      return handleRenameProject(db, args);
+    case "cortex_forget_project":
+      return handleForgetProject(db, args);
+    case "cortex_analytics":
+      return handleAnalytics(args);
+    default:
+      return null;
+  }
+}
+async function handleMcpRequest(db, request) {
+  const { id, method, params } = request;
+  try {
+    switch (method) {
+      case "initialize":
+        return { jsonrpc: "2.0", id, result: makeInitializeResult() };
+      case "tools/list":
+        return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+      case "tools/call": {
+        const { name, arguments: args } = params;
+        const result = await callTool(db, name, args || {});
+        if (result === null) {
+          return {
+            jsonrpc: "2.0",
+            id,
+            error: {
+              code: -32601,
+              message: `Unknown tool: ${name}`
+            }
+          };
+        }
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(result, null, 2)
+              }
+            ]
+          }
+        };
+      }
+      default:
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32601,
+            message: `Method not found: ${method}`
+          }
+        };
+    }
+  } catch (error) {
+    return {
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32603,
+        message: error instanceof Error ? error.message : String(error)
+      }
+    };
+  }
+}
+
+// src/daemon-client.ts
+import * as fs5 from "fs";
+function getDaemonBaseUrl() {
+  return `http://127.0.0.1:${getDaemonPort()}`;
+}
+async function daemonFetch(path3, options = {}) {
+  const { method = "GET", body, timeoutMs = 1e3 } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
+      method,
+      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      body: body !== void 0 ? JSON.stringify(body) : void 0,
+      signal: controller.signal
+    });
+    if (!response.ok && response.status !== 202) {
+      const errBody = await response.text().catch(() => "");
+      throw new Error(
+        `Daemon responded ${response.status} for ${path3}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
+      );
+    }
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function getDaemonHealth(timeoutMs = 500) {
+  try {
+    const health = await daemonFetch("/health", { timeoutMs });
+    return health;
+  } catch {
+    return null;
+  }
+}
+async function stopDaemon() {
+  let requested = false;
+  try {
+    await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
+    requested = true;
+  } catch {
+    try {
+      const infoPath = getDaemonInfoPath();
+      if (fs5.existsSync(infoPath)) {
+        const info = JSON.parse(fs5.readFileSync(infoPath, "utf8"));
+        if (info.pid) {
+          process.kill(info.pid, "SIGTERM");
+          requested = true;
+        }
+      }
+    } catch {
+    }
+  }
+  return requested;
+}
+
+// src/daemon.ts
+var MAX_BODY_BYTES = 10 * 1024 * 1024;
+var startedAt = Date.now();
+var dbPromise = null;
+function getDb() {
+  if (!dbPromise) {
+    dbPromise = initDb();
+  }
+  return dbPromise;
+}
+var archiveChain = Promise.resolve();
+async function runArchive(body) {
+  const db = await getDb();
+  const projectId = body.projectId ?? null;
+  const result = await archiveSession(db, body.transcriptPath, projectId);
+  if (body.markAutoSave) {
+    markAutoSaved(body.transcriptPath, body.contextPercent ?? 0, result.archived);
+  }
+  if (result.archived > 0) {
+    recordSavePoint(body.contextPercent ?? 0, result.archived);
+  }
+  return { ...result, formatted: formatArchiveResult(result) };
+}
+function enqueueArchive(body) {
+  const job = archiveChain.then(() => runArchive(body));
+  archiveChain = job.then(
+    () => void 0,
+    () => void 0
+  );
+  return job;
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    let rejected = false;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      if (rejected)
+        return;
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        rejected = true;
+        reject(new Error("Request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (!rejected)
+        resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (error) => {
+      if (!rejected) {
+        rejected = true;
+        reject(error);
+      }
+    });
+  });
+}
+function parseBody(raw) {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return null;
+  }
+}
+function respondJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(body);
+}
+async function handleRequest(req, res) {
+  const url = new URL(req.url || "/", "http://127.0.0.1");
+  const route = `${req.method} ${url.pathname}`;
+  switch (route) {
+    case "GET /health": {
+      respondJson(res, 200, {
+        name: "cortex-daemon",
+        version: VERSION,
+        pid: process.pid,
+        port: getDaemonPort(),
+        uptime: Math.round((Date.now() - startedAt) / 1e3)
+      });
+      return;
+    }
+    case "POST /mcp": {
+      const raw = await readBody(req);
+      let message;
+      try {
+        message = JSON.parse(raw);
+      } catch (error) {
+        respondJson(res, 400, {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Parse error", data: error instanceof Error ? error.message : String(error) }
+        });
+        return;
+      }
+      if (!("id" in message)) {
+        res.writeHead(202).end();
+        return;
+      }
+      const db = await getDb();
+      const response = await handleMcpRequest(db, message);
+      respondJson(res, 200, response);
+      return;
+    }
+    case "GET /stats": {
+      const db = await getDb();
+      const stats = getStats(db);
+      const payload = {
+        version: VERSION,
+        fragmentCount: stats.fragmentCount,
+        projectCount: stats.projectCount,
+        sessionCount: stats.sessionCount,
+        dbSizeBytes: stats.dbSizeBytes
+      };
+      const projectId = url.searchParams.get("projectId");
+      if (projectId) {
+        const projectStats = getProjectStats(db, projectId);
+        payload.project = {
+          fragmentCount: projectStats.fragmentCount,
+          sessionCount: projectStats.sessionCount,
+          lastArchive: projectStats.lastArchive?.toISOString() || null
+        };
+      }
+      respondJson(res, 200, payload);
+      return;
+    }
+    case "POST /restore": {
+      const body = parseBody(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: "Invalid JSON body" });
+        return;
+      }
+      const db = await getDb();
+      const restoration = await buildRestorationContext(db, body.projectId ?? null, {
+        messageCount: body.messageCount ?? 5,
+        tokenBudget: body.tokenBudget ?? 2e3
+      });
+      respondJson(res, 200, {
+        hasContent: restoration.hasContent,
+        formatted: restoration.hasContent ? formatRestorationContext(restoration) : ""
+      });
+      return;
+    }
+    case "POST /archive": {
+      const body = parseBody(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: "Invalid JSON body" });
+        return;
+      }
+      if (!body.transcriptPath) {
+        respondJson(res, 400, { error: "transcriptPath is required" });
+        return;
+      }
+      if (body.async) {
+        enqueueArchive(body).catch(() => void 0);
+        respondJson(res, 202, { queued: true });
+        return;
+      }
+      const result = await enqueueArchive(body);
+      respondJson(res, 200, result);
+      return;
+    }
+    case "POST /shutdown": {
+      respondJson(res, 200, { shuttingDown: true });
+      setTimeout(() => shutdown(0), 50);
+      return;
+    }
+    default: {
+      respondJson(res, 404, { error: `Unknown route: ${route}` });
+    }
+  }
+}
+function writeDaemonInfo(port) {
+  try {
+    fs6.writeFileSync(
+      getDaemonInfoPath(),
+      JSON.stringify({ pid: process.pid, port, version: VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)
+    );
   } catch {
   }
 }
+function removeDaemonInfo() {
+  try {
+    const infoPath = getDaemonInfoPath();
+    if (fs6.existsSync(infoPath)) {
+      const info = JSON.parse(fs6.readFileSync(infoPath, "utf8"));
+      if (info.pid === process.pid) {
+        fs6.unlinkSync(infoPath);
+      }
+    }
+  } catch {
+  }
+}
+var shuttingDown = false;
+function shutdown(code) {
+  if (shuttingDown)
+    return;
+  shuttingDown = true;
+  try {
+    if (dbPromise) {
+      closeDb();
+    }
+  } catch {
+  }
+  removeDaemonInfo();
+  process.exit(code);
+}
 async function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
-  debugLog("main", `Command invoked: ${command || "statusline (default)"}`, {
-    args,
-    cwd: process.cwd(),
-    pluginRoot: process.env.CLAUDE_PLUGIN_ROOT,
-    projectDir: process.env.CLAUDE_PROJECT_DIR
-  });
-  try {
-    switch (command) {
-      case "statusline":
-        await handleStatusline();
-        break;
-      case "session-start":
-        await handleSessionStart();
-        break;
-      case "background-save":
-        await handleBackgroundSave(args);
-        break;
-      case "session-end":
-        await handleSessionEnd();
-        break;
-      case "monitor":
-      case "context-check":
-        break;
-      case "clear-reminder":
-      case "post-tool":
-        await handlePostTool();
-        break;
-      case "pre-compact":
-        await handlePreCompact();
-        break;
-      case "smart-compact":
-        await handlePreCompact();
-        break;
-      case "save":
-      case "archive":
-        await handleSave(args.slice(1));
-        break;
-      case "recall":
-      case "search":
-        await handleRecall(args.slice(1));
-        break;
-      case "stats":
-        await handleStats();
-        break;
-      case "setup":
-        await handleSetup(args.slice(1));
-        break;
-      case "ensure-daemon":
-        await handleEnsureDaemon();
-        break;
-      case "daemon-status":
-        await handleDaemonStatus();
-        break;
-      case "daemon-stop":
-        await handleDaemonStop();
-        break;
-      case "configure":
-        await handleConfigure(args.slice(1));
-        break;
-      case "test-embed":
-        await handleTestEmbed(args[1] || "hello world");
-        break;
-      case "check-db":
-        await handleCheckDb();
-        break;
-      default:
-        await handleStatusline();
-        break;
-    }
-    debugLog("main", `Command completed successfully: ${command || "statusline"}`);
-  } catch (error) {
-    debugLog("main", `Command failed: ${command}`, {
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : void 0
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.removeAllListeners(sig);
+    process.on(sig, () => shutdown(0));
+  }
+  const port = getDaemonPort();
+  const server = http.createServer((req, res) => {
+    handleRequest(req, res).catch((error) => {
+      try {
+        respondJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+      } catch {
+      }
     });
-    console.error(`[Cortex Error] ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
-  } finally {
-    closeDb();
-  }
-}
-var CHAINED_COMMAND_TIMEOUT_MS = 500;
-function executeChainedStatusline() {
-  const chainedCommand = getChainedStatuslineCommand();
-  if (!chainedCommand) {
-    return null;
-  }
-  try {
-    const output = execSync(chainedCommand, {
-      timeout: CHAINED_COMMAND_TIMEOUT_MS,
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    const firstLine = output.trim().split("\n")[0];
-    return firstLine || null;
-  } catch (error) {
-    debugLog("executeChainedStatusline", "Chained command failed", {
-      command: chainedCommand,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return null;
-  }
-}
-async function handleStatusline() {
-  const stdin = await readStdin();
-  const config = loadConfig();
-  const daemonMode = config.daemon.enabled;
-  let remoteStats = null;
-  let db = null;
-  if (daemonMode) {
-    remoteStats = await getDaemonStats(null, 300);
-    if (!remoteStats || remoteStats.version !== VERSION) {
-      spawnDaemonDetached();
-    }
-  } else {
-    db = await initDb();
-  }
-  let contextPercent = 0;
-  if (stdin?.cwd) {
-    contextPercent = getContextPercent(stdin);
-    const projectId = getProjectId(stdin.cwd);
-    if (stdin.transcript_path) {
-      saveCurrentSession(stdin.transcript_path, projectId === "unknown" ? null : projectId);
-    }
-    if (config.autosave.contextStep.enabled && stdin.transcript_path) {
-      if (shouldAutoSave(contextPercent, stdin.transcript_path)) {
-        if (daemonMode) {
-          setSavingState(true, stdin.transcript_path);
-          const queued = await requestDaemonArchive({
-            transcriptPath: stdin.transcript_path,
-            // 'unknown' (root dir) means no project: store as global
-            projectId: projectId === "unknown" ? null : projectId,
-            contextPercent,
-            markAutoSave: true,
-            async: true,
-            // Statusline is the hottest path: never stall the render
-            timeoutMs: 500
-          });
-          if (!queued) {
-            setSavingState(false, null);
-            spawnDaemonDetached();
-          }
-        } else {
-          const result = await archiveSession(db, stdin.transcript_path, projectId);
-          if (result.archived > 0) {
-            markAutoSaved(stdin.transcript_path, contextPercent, result.archived);
-            recordSavePoint(contextPercent, result.archived);
-          } else {
-            markAutoSaved(stdin.transcript_path, contextPercent, 0);
-          }
-        }
-      }
-    }
-  }
-  if (config.statusline.enabled) {
-    const fragmentCount = daemonMode ? remoteStats?.fragmentCount ?? null : getStats(db).fragmentCount;
-    const parts = [];
-    const chainedOutput = executeChainedStatusline();
-    if (chainedOutput) {
-      parts.push(chainedOutput);
-      parts.push(`${ANSI.darkGray}|${ANSI.reset}`);
-    }
-    parts.push(`${ANSI.brick}\u03A8${ANSI.reset}`);
-    if (config.statusline.showFragments && fragmentCount !== null) {
-      parts.push(formatCompactNumber(fragmentCount));
-    }
-    if (config.statusline.showContext) {
-      const contextStrip = createContextStrip(contextPercent);
-      parts.push(contextStrip);
-    }
-    if (isShowingSavingIndicator()) {
-      const frames = ["\u280B", "\u2819", "\u2839", "\u2838", "\u283C", "\u2834", "\u2826", "\u2827", "\u2807", "\u280F"];
-      const frame = frames[Math.floor(Date.now() / 80) % frames.length];
-      parts.push(`${ANSI.yellow}${frame} Saving${ANSI.reset}`);
-    } else if (wasRecentlySaved()) {
-      parts.push(`${ANSI.green}\u2713 Autosaved${ANSI.reset}`);
-    } else {
-      const timeAgo = getLastSaveTimeAgo(stdin?.transcript_path ?? null);
-      if (timeAgo) {
-        parts.push(`${ANSI.green}\u2713${ANSI.reset} ${ANSI.dim}${timeAgo}${ANSI.reset}`);
-      }
-      if (!daemonMode && stdin?.transcript_path && config.autosave.contextStep.enabled) {
-        if (shouldAutoSave(contextPercent, stdin.transcript_path)) {
-          setSavingState(true, stdin.transcript_path);
-          const scriptPath = process.argv[1];
-          const nodePath = process.argv[0];
-          const childArgs = ["background-save"];
-          if (stdin.transcript_path)
-            childArgs.push(`--transcript=${stdin.transcript_path}`);
-          if (stdin.cwd)
-            childArgs.push(`--cwd=${stdin.cwd}`);
-          childArgs.push(`--percent=${contextPercent}`);
-          try {
-            const subprocess = spawn2(nodePath, [scriptPath, ...childArgs], {
-              detached: true,
-              stdio: "ignore",
-              env: process.env
-            });
-            subprocess.unref();
-          } catch (e) {
-            setSavingState(false, null);
-          }
-        }
-      }
-    }
-    console.log(parts.join(" "));
-  }
-}
-function createContextStrip(percent) {
-  const totalCircles = 5;
-  const filled = Math.round(percent / 100 * totalCircles);
-  const empty = totalCircles - filled;
-  let color;
-  if (percent < 70) {
-    color = ANSI.brick;
-  } else if (percent < 85) {
-    color = ANSI.yellow;
-  } else {
-    color = ANSI.red;
-  }
-  const filledCircles = "\u25CF".repeat(filled);
-  const emptyCircles = "\u25CB".repeat(empty);
-  return `${color}${filledCircles}${ANSI.dim}${emptyCircles}${ANSI.reset} ${percent}%`;
-}
-function buildAwarenessContext(config) {
-  if (!config.awareness.enabled)
-    return null;
-  const lines = [];
-  if (config.awareness.userName) {
-    lines.push(`User: ${config.awareness.userName}`);
-  }
-  if (config.awareness.timezone !== "off") {
-    const tz = config.awareness.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const now = /* @__PURE__ */ new Date();
-    let formattedDate;
-    let formattedTime;
-    let resolvedTz = tz;
-    try {
-      formattedDate = new Intl.DateTimeFormat("en-US", {
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        timeZone: tz
-      }).format(now);
-      formattedTime = new Intl.DateTimeFormat("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-        timeZone: tz
-      }).format(now);
-    } catch {
-      resolvedTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      formattedDate = new Intl.DateTimeFormat("en-US", {
-        weekday: "long",
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        timeZone: resolvedTz
-      }).format(now);
-      formattedTime = new Intl.DateTimeFormat("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-        timeZone: resolvedTz
-      }).format(now);
-    }
-    lines.push(`Date: ${formattedDate}`);
-    lines.push(`Time: ${formattedTime} (${resolvedTz})`);
-  }
-  return lines.join("\n");
-}
-async function handleSessionStart() {
-  debugLog("handleSessionStart", "Hook invoked");
-  const stdin = await readStdin();
-  debugLog("handleSessionStart", "Stdin received", { hasStdin: !!stdin, cwd: stdin?.cwd, transcriptPath: stdin?.transcript_path });
-  const config = loadConfig();
-  if (!config.setup.completed) {
-    debugLog("handleSessionStart", "Setup not completed, showing first-run message");
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.yellow}First run detected. Run ${ANSI.cyan}/cortex-setup${ANSI.reset} to initialize.`);
-    return;
-  }
-  resetAutoSaveState();
-  const rawProjectId = stdin?.cwd ? getProjectId(stdin.cwd) : null;
-  const projectId = rawProjectId === "unknown" ? null : rawProjectId;
-  if (stdin?.transcript_path) {
-    saveCurrentSession(stdin.transcript_path, projectId);
-  }
-  startSession(projectId);
-  if (config.daemon.enabled) {
-    const handled = await sessionStartViaDaemon(config, projectId);
-    if (handled)
-      return;
-  }
-  const db = await initDb();
-  const projectStats = projectId ? getProjectStats(db, projectId) : null;
-  const restoration = await buildRestorationContext(db, projectId, {
-    messageCount: config.restoration.messageCount,
-    tokenBudget: config.restoration.tokenBudget
   });
-  if (projectStats && projectStats.fragmentCount > 0) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}${projectStats.fragmentCount} memories for ${ANSI.bold}${projectId}${ANSI.reset}`);
-  } else if (projectId) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Ready for ${ANSI.bold}${projectId}${ANSI.reset} (no memories yet)`);
-  } else {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Session started`);
-  }
-  const awareness = buildAwarenessContext(config);
-  if (restoration.hasContent || awareness) {
-    console.log("");
-    console.log(`${ANSI.dim}--- Restoration Context ---${ANSI.reset}`);
-    if (awareness) {
-      console.log(awareness);
-      if (restoration.hasContent)
-        console.log("");
-    }
-    if (restoration.hasContent) {
-      console.log(formatRestorationContext(restoration));
-    }
-    console.log(`${ANSI.dim}---------------------------${ANSI.reset}`);
-  }
-}
-async function sessionStartViaDaemon(config, projectId) {
-  const ready = await ensureDaemon(8e3);
-  if (!ready)
-    return false;
-  const stats = await getDaemonStats(projectId, 3e3);
-  if (!stats)
-    return false;
-  const fragmentCount = stats.project?.fragmentCount ?? 0;
-  if (projectId && fragmentCount > 0) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}${fragmentCount} memories for ${ANSI.bold}${projectId}${ANSI.reset}`);
-  } else if (projectId) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Ready for ${ANSI.bold}${projectId}${ANSI.reset} (no memories yet)`);
-  } else {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Session started`);
-  }
-  const restoration = await requestDaemonRestore({
-    projectId,
-    messageCount: config.restoration.messageCount,
-    tokenBudget: config.restoration.tokenBudget
-  });
-  const awareness = buildAwarenessContext(config);
-  const hasRestoration = restoration?.hasContent ?? false;
-  if (hasRestoration || awareness) {
-    console.log("");
-    console.log(`${ANSI.dim}--- Restoration Context ---${ANSI.reset}`);
-    if (awareness) {
-      console.log(awareness);
-      if (hasRestoration)
-        console.log("");
-    }
-    if (hasRestoration && restoration) {
-      console.log(restoration.formatted);
-    }
-    console.log(`${ANSI.dim}---------------------------${ANSI.reset}`);
-  }
-  return true;
-}
-async function handleSessionEnd() {
-  debugLog("handleSessionEnd", "Hook invoked");
-  const stdin = await readStdin();
-  const config = loadConfig();
-  if (!config.autosave.onSessionEnd) {
-    debugLog("handleSessionEnd", "Disabled by config");
-    return;
-  }
-  if (!stdin?.transcript_path) {
-    debugLog("handleSessionEnd", "No transcript path - aborting");
-    return;
-  }
-  const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Saving session before exit...`);
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
-    const result2 = await requestDaemonArchive({
-      transcriptPath: stdin.transcript_path,
-      projectId,
-      timeoutMs: 2e4
-    });
-    if (result2) {
-      if (result2.archived > 0) {
-        console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.green}Saved ${result2.archived} memories`);
-      }
-      return;
-    }
-  }
-  const db = await initDb();
-  const result = await archiveSession(db, stdin.transcript_path, projectId);
-  if (result.archived > 0) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.green}Saved ${result.archived} memories`);
-  }
-}
-async function handlePostTool() {
-  const stdin = await readStdin();
-  const config = loadConfig();
-  if (!stdin?.transcript_path)
-    return;
-  if (config.autosave.contextStep.enabled) {
-    const currentPercent = getContextPercent(stdin);
-    if (shouldAutoSave(currentPercent, stdin.transcript_path)) {
-      if (config.daemon.enabled) {
-        setSavingState(true, stdin.transcript_path);
-        const queued = await requestDaemonArchive({
-          transcriptPath: stdin.transcript_path,
-          projectId: stdin.cwd ? getProjectId(stdin.cwd) : null,
-          contextPercent: currentPercent,
-          markAutoSave: true,
-          async: true,
-          timeoutMs: 800
-        });
-        if (!queued) {
-          setSavingState(false, null);
-          spawnDaemonDetached();
-        }
-      } else {
-        await performAutosave(stdin, "context step");
-      }
-    }
-  }
-}
-async function performAutosave(stdin, trigger) {
-  if (!stdin.transcript_path)
-    return;
-  const db = await initDb();
-  const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
-  const contextPercent = getContextPercent(stdin);
-  const result = await archiveSession(db, stdin.transcript_path, projectId);
-  if (result.archived > 0) {
-    markAutoSaved(stdin.transcript_path, contextPercent, result.archived);
-    recordSavePoint(contextPercent, result.archived);
-    debugLog("autosave", `Saved ${result.archived} fragments`, { trigger, contextPercent });
-  } else {
-    markAutoSaved(stdin.transcript_path, contextPercent, 0);
-  }
-}
-async function handleBackgroundSave(args) {
-  let transcriptPath = "";
-  let cwd = "";
-  let contextPercent = 0;
-  for (const arg of args) {
-    if (arg.startsWith("--transcript="))
-      transcriptPath = arg.slice("--transcript=".length);
-    else if (arg.startsWith("--cwd="))
-      cwd = arg.slice("--cwd=".length);
-    else if (arg.startsWith("--percent="))
-      contextPercent = parseFloat(arg.slice("--percent=".length));
-  }
-  if (!transcriptPath) {
-    setSavingState(false, null);
-    return;
-  }
-  try {
-    const db = await initDb();
-    const projectId = cwd ? getProjectId(cwd) : null;
-    const result = await archiveSession(db, transcriptPath, projectId);
-    if (result.archived > 0) {
-      markAutoSaved(transcriptPath, contextPercent, result.archived);
-      recordSavePoint(contextPercent, result.archived);
-    } else {
-      markAutoSaved(transcriptPath, contextPercent, 0);
-    }
-  } catch (error) {
-    setSavingState(false, null);
-  }
-}
-async function handlePreCompact() {
-  debugLog("handlePreCompact", "Hook invoked");
-  const stdin = await readStdin();
-  debugLog("handlePreCompact", "Stdin received", { hasStdin: !!stdin, cwd: stdin?.cwd, transcriptPath: stdin?.transcript_path });
-  const config = loadConfig();
-  resetAutoSaveState();
-  if (!config.autosave.onPreCompact) {
-    debugLog("handlePreCompact", "Disabled by config");
-    return;
-  }
-  if (!stdin?.transcript_path) {
-    debugLog("handlePreCompact", "No transcript path - aborting");
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} No transcript available for archiving`);
-    return;
-  }
-  const projectId = config.archive.projectScope && stdin.cwd ? getProjectId(stdin.cwd) : null;
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-archiving before compact...`);
-    const result2 = await requestDaemonArchive({
-      transcriptPath: stdin.transcript_path,
-      projectId,
-      contextPercent: getContextPercent(stdin),
-      timeoutMs: 45e3
-    });
-    if (result2) {
-      console.log(`${ANSI.brick}\u03A8${ANSI.reset} Archived ${result2.archived} fragments (${result2.duplicates} duplicates skipped)`);
-      const restoration2 = await requestDaemonRestore({
-        projectId,
-        messageCount: config.restoration.messageCount,
-        tokenBudget: config.restoration.tokenBudget
-      });
-      const awareness2 = buildAwarenessContext(config);
-      const hasRestoration = restoration2?.hasContent ?? false;
-      if (hasRestoration || awareness2) {
-        console.log("");
-        console.log(`${ANSI.cyan}=== Restoration Context ===${ANSI.reset}`);
-        if (awareness2) {
-          console.log(awareness2);
-          if (hasRestoration)
-            console.log("");
-        }
-        if (hasRestoration && restoration2) {
-          console.log(restoration2.formatted);
-        }
-        console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
-      }
-      return;
-    }
-  }
-  const db = await initDb();
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-archiving before compact...`);
-  const result = await archiveSession(db, stdin.transcript_path, projectId, {
-    onProgress: (current, total) => {
-      process.stdout.write(`\r${ANSI.brick}\u03A8${ANSI.reset} Embedding ${current}/${total}...`);
-    }
-  });
-  console.log("");
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Archived ${result.archived} fragments (${result.duplicates} duplicates skipped)`);
-  const restoration = await buildRestorationContext(db, projectId, {
-    messageCount: config.restoration.messageCount,
-    tokenBudget: config.restoration.tokenBudget
-  });
-  const awareness = buildAwarenessContext(config);
-  if (restoration.hasContent || awareness) {
-    console.log("");
-    console.log(`${ANSI.cyan}=== Restoration Context ===${ANSI.reset}`);
-    if (awareness) {
-      console.log(awareness);
-      if (restoration.hasContent)
-        console.log("");
-    }
-    if (restoration.hasContent) {
-      console.log(formatRestorationContext(restoration));
-    }
-    console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
-  }
-}
-async function handleSave(args) {
-  const stdin = await readStdin();
-  const config = loadConfig();
-  let transcriptPath = "";
-  let forceGlobal = false;
-  for (const arg of args) {
-    if (arg === "--all" || arg === "--global") {
-      forceGlobal = true;
-    } else if (arg.startsWith("--transcript=")) {
-      transcriptPath = arg.slice("--transcript=".length);
-    } else if (!arg.startsWith("--")) {
-      transcriptPath = arg;
-    }
-  }
-  if (!transcriptPath && stdin?.transcript_path) {
-    transcriptPath = stdin.transcript_path;
-  }
-  if (!transcriptPath) {
-    console.log("Usage: cortex save [--transcript=PATH] [--global]");
-    console.log("       Or pipe stdin data from Claude Code");
-    return;
-  }
-  const db = await initDb();
-  const projectId = forceGlobal ? null : config.archive.projectScope && stdin?.cwd ? getProjectId(stdin.cwd) : null;
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Archiving session${projectId ? ` to ${projectId}` : " (global)"}...`);
-  const result = await archiveSession(db, transcriptPath, projectId, {
-    onProgress: (current, total) => {
-      process.stdout.write(`\r${ANSI.brick}\u03A8${ANSI.reset} Processing ${current}/${total}...`);
-    }
-  });
-  console.log("");
-  console.log(formatArchiveResult(result));
-}
-async function handleRecall(args) {
-  const stdin = await readStdin();
-  let query = "";
-  let includeAll = false;
-  for (const arg of args) {
-    if (arg === "--all" || arg === "--global") {
-      includeAll = true;
-    } else if (!arg.startsWith("--")) {
-      query += (query ? " " : "") + arg;
-    }
-  }
-  if (!query) {
-    console.log("Usage: cortex recall <query> [--all]");
-    console.log("       --all: Search across all projects");
-    return;
-  }
-  const db = await initDb();
-  const projectId = stdin?.cwd ? getProjectId(stdin.cwd) : null;
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Searching${includeAll ? " all projects" : projectId ? ` in ${projectId}` : ""}...`);
-  const results = await hybridSearch(db, query, {
-    projectScope: !includeAll,
-    projectId: projectId || void 0,
-    includeAllProjects: includeAll,
-    limit: 5
-  });
-  console.log(formatSearchResults(results));
-}
-async function handleStats() {
-  const stdin = await readStdin();
-  const db = await initDb();
-  const stats = getStats(db);
-  const lines = [];
-  lines.push("");
-  lines.push("Cortex Memory Stats");
-  lines.push("------------------------");
-  lines.push(`  Fragments: ${stats.fragmentCount}`);
-  lines.push(`  Projects:  ${stats.projectCount}`);
-  lines.push(`  Sessions:  ${stats.sessionCount}`);
-  lines.push(`  DB Size:   ${formatBytes(stats.dbSizeBytes)}`);
-  lines.push(`  Model:     ${getModelName()}`);
-  if (stats.oldestTimestamp) {
-    lines.push(`  Oldest:    ${stats.oldestTimestamp.toLocaleDateString()}`);
-  }
-  if (stats.newestTimestamp) {
-    lines.push(`  Newest:    ${stats.newestTimestamp.toLocaleDateString()}`);
-  }
-  if (stdin?.cwd) {
-    const projectId = getProjectId(stdin.cwd);
-    const projectStats = getProjectStats(db, projectId);
-    lines.push("");
-    lines.push(`Project: ${projectId}`);
-    lines.push(`  Fragments: ${projectStats.fragmentCount}`);
-    lines.push(`  Sessions:  ${projectStats.sessionCount}`);
-    if (projectStats.lastArchive) {
-      lines.push(`  Last Save: ${formatDuration(projectStats.lastArchive)}`);
-    }
-  }
-  console.log(lines.join("\n"));
-}
-async function handleSetup(setupArgs = []) {
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Setting up Cortex...`);
-  ensureDataDir();
-  console.log(`  \u2713 Data directory: ${getDataDir()}`);
-  const db = await initDb();
-  saveDb(db);
-  console.log("  \u2713 Database initialized");
-  const fs6 = await import("fs");
-  const path3 = await import("path");
-  const os3 = await import("os");
-  const pluginDir = new URL(".", import.meta.url).pathname.replace("/dist/", "");
-  const nodeModulesPath = `${pluginDir}/node_modules`;
-  if (!fs6.existsSync(nodeModulesPath)) {
-    console.log("  \u23F3 Installing dependencies (first run only)...");
-    const { execSync: execSync2 } = await import("child_process");
-    try {
-      execSync2("npm install", {
-        cwd: pluginDir,
-        stdio: "pipe",
-        timeout: 12e4
-      });
-      console.log("  \u2713 Dependencies installed");
-    } catch (installError) {
-      console.log(`  \u2717 Install failed: ${installError instanceof Error ? installError.message : String(installError)}`);
-      console.log("");
-      console.log("Manual fix:");
-      console.log(`  cd ${pluginDir} && npm install`);
-      return;
-    }
-  }
-  console.log("  \u23F3 Loading embedding model (first run may take a minute)...");
-  const modelStatus = await verifyModel();
-  if (modelStatus.success) {
-    console.log(`  \u2713 Model loaded: ${modelStatus.model} (${modelStatus.dimensions}d)`);
-  } else {
-    console.log(`  \u2717 Model failed: ${modelStatus.error}`);
-    return;
-  }
-  console.log("  \u23F3 Configuring statusline...");
-  const claudeDir = path3.join(os3.homedir(), ".claude");
-  const claudeSettingsPath = path3.join(claudeDir, "settings.json");
-  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || pluginDir;
-  const statuslineResult = configureClaudeStatusline(claudeSettingsPath, pluginRoot);
-  if (statuslineResult.configured && statuslineResult.chained) {
-    console.log("  \u2713 Statusline configured (chained with existing)");
-    console.log(`    Your original statusline will run first, followed by Cortex.`);
-    console.log(`    Original: ${statuslineResult.chainedCommand}`);
-  } else if (statuslineResult.configured) {
-    console.log("  \u2713 Statusline configured");
-  } else if (statuslineResult.skipped) {
-    console.log("  \u26A0 Statusline skipped (existing configuration detected)");
-    console.log("");
-    console.log(`${ANSI.yellow}Existing statusline:${ANSI.reset}`);
-    console.log(`  ${statuslineResult.existingCommand}`);
-    console.log("");
-    console.log("To use Cortex statusline instead, either:");
-    console.log("  1. Remove the existing statusLine from ~/.claude/settings.json");
-    console.log("  2. Or manually set it to:");
-    console.log(`     "statusLine": { "type": "command", "command": "node ${pluginRoot}/dist/index.js statusline" }`);
-  }
-  if (setupArgs.includes("--daemon")) {
-    const current = loadConfig();
-    updateConfig({ daemon: { ...current.daemon, enabled: true } });
-    console.log("  \u23F3 Enabling shared daemon mode (single DB + model for all sessions)...");
-    const daemonReady = await ensureDaemon();
-    if (daemonReady) {
-      console.log("  \u2713 Daemon running");
-    } else {
-      console.log("  \u26A0 Daemon could not be started - sessions will fall back to local mode");
-    }
-  } else {
-    console.log("");
-    console.log(`${ANSI.dim}Tip: running many Claude Code sessions? Enable shared daemon mode so they${ANSI.reset}`);
-    console.log(`${ANSI.dim}all share ONE database + embedding model (large RAM/disk savings):${ANSI.reset}`);
-    console.log(`${ANSI.dim}  /cortex-configure daemon on   (or: node dist/index.js configure daemon on)${ANSI.reset}`);
-  }
-  markSetupComplete();
-  console.log("  \u2713 Setup marked complete");
-  const stdin = await readStdin();
-  if (stdin?.transcript_path) {
-    const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
-    saveCurrentSession(stdin.transcript_path, projectId);
-    console.log("  \u2713 Session registered");
-  }
-  console.log("");
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Setup complete!`);
-  console.log("");
-  console.log(`${ANSI.yellow}Now restart Claude Code to enable memory tools${ANSI.reset}`);
-  console.log("");
-  console.log("Commands available:");
-  console.log("  /cortex:save     - Archive session context");
-  console.log("  /cortex:recall   - Search memories");
-  console.log("  /cortex:stats    - View memory statistics");
-  console.log("  /cortex:configure - Adjust settings");
-}
-async function handleConfigure(args) {
-  if (args[0] === "daemon") {
-    const action = args[1];
-    const current = loadConfig();
-    if (action === "on" || action === "enable") {
-      updateConfig({ daemon: { ...current.daemon, enabled: true } });
-      console.log(`${ANSI.brick}\u03A8${ANSI.reset} Daemon mode ${ANSI.green}enabled${ANSI.reset} (shared server on 127.0.0.1:${current.daemon.port})`);
-      const ready = await ensureDaemon();
-      console.log(ready ? "  \u2713 Daemon started" : "  \u26A0 Daemon could not be started (will retry on next session)");
-      console.log("  Restart Claude Code sessions to route memory tools through the daemon.");
-    } else if (action === "off" || action === "disable") {
-      updateConfig({ daemon: { ...current.daemon, enabled: false } });
-      await stopDaemon();
-      console.log(`${ANSI.brick}\u03A8${ANSI.reset} Daemon mode ${ANSI.yellow}disabled${ANSI.reset} (classic per-process mode)`);
-      console.log("  Restart Claude Code sessions to apply.");
-    } else {
-      const health = await getDaemonHealth();
-      console.log(`Daemon mode:    ${current.daemon.enabled ? "enabled" : "disabled"} (port ${current.daemon.port})`);
-      console.log(`Daemon process: ${health ? `running v${health.version} (pid ${health.pid}, up ${health.uptime}s)` : "not running"}`);
-      if (health && health.version !== VERSION) {
-        console.log(`${ANSI.yellow}Note: daemon is v${health.version} but plugin is v${VERSION} - it will be replaced on next use.${ANSI.reset}`);
-      }
-    }
-    return;
-  }
-  const preset = args[0];
-  if (preset && ["full", "essential", "minimal"].includes(preset)) {
-    const config = applyPreset(preset);
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} Applied "${preset}" preset`);
-    console.log("");
-    console.log("Configuration:");
-    console.log(`  Statusline: ${config.statusline.enabled ? "enabled" : "disabled"}`);
-    console.log(`  Auto-archive (PreCompact): ${config.autosave.onPreCompact ? "enabled" : "disabled"}`);
-    console.log(`  Auto-save (Context Step): ${config.autosave.contextStep.enabled ? config.autosave.contextStep.step + "%" : "disabled"}`);
-    return;
-  }
-  console.log("Usage: cortex configure <preset>");
-  console.log("       cortex configure daemon on|off|status");
-  console.log("");
-  console.log("Presets:");
-  console.log("  full      - All features enabled (statusline, auto-archive, auto-save)");
-  console.log("  essential - Statusline + auto-archive only");
-  console.log("  minimal   - Commands only (no hooks/statusline)");
-  console.log("");
-  console.log("Daemon mode:");
-  console.log("  daemon on     - Share ONE database + embedding model across all sessions");
-  console.log("  daemon off    - Classic per-process mode (default)");
-  console.log("  daemon status - Show daemon mode config and process state");
-}
-async function handleTestEmbed(text) {
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Testing embedding for: "${text}"`);
-  const result = await verifyModel();
-  if (result.success) {
-    console.log(`  Model: ${result.model}`);
-    console.log(`  Dimensions: ${result.dimensions}`);
-    console.log("  \u2713 Embedding generation working");
-  } else {
-    console.log(`  \u2717 Error: ${result.error}`);
-  }
-}
-async function handleEnsureDaemon() {
-  const config = loadConfig();
-  if (!config.daemon.enabled) {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} Daemon mode is disabled. Enable with: configure daemon on`);
-    return;
-  }
-  const ready = await ensureDaemon();
-  if (ready) {
-    const health = await getDaemonHealth();
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.green}Daemon running${ANSI.reset} v${health?.version} (pid ${health?.pid}, port ${health?.port})`);
-  } else {
-    console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.red}Failed to start daemon${ANSI.reset}`);
-    process.exitCode = 1;
-  }
-}
-async function handleDaemonStatus() {
-  const config = loadConfig();
-  const health = await getDaemonHealth();
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Cortex Daemon`);
-  console.log(`  Mode:    ${config.daemon.enabled ? `${ANSI.green}enabled${ANSI.reset}` : "disabled"} (port ${config.daemon.port})`);
-  if (health) {
-    console.log(`  Process: running v${health.version} (pid ${health.pid}, up ${health.uptime}s)`);
-    if (health.version !== VERSION) {
-      console.log(`  ${ANSI.yellow}\u26A0 Daemon is v${health.version}, plugin is v${VERSION} - it will be auto-replaced on next use${ANSI.reset}`);
-    }
-  } else {
-    console.log("  Process: not running");
-  }
-}
-async function handleDaemonStop() {
-  const requested = await stopDaemon();
-  console.log(
-    requested ? `${ANSI.brick}\u03A8${ANSI.reset} Daemon stop requested` : `${ANSI.brick}\u03A8${ANSI.reset} Daemon not running`
-  );
-}
-async function handleCheckDb() {
-  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Database Integrity Check`);
-  console.log("================================");
-  let hasErrors = false;
-  try {
-    const db = await initDb();
-    const validation = validateDatabase(db);
-    console.log("");
-    console.log("Schema Validation:");
-    if (validation.tablesFound.length > 0) {
-      console.log(`  Tables found: ${validation.tablesFound.join(", ")}`);
-    }
-    if (validation.errors.length === 0) {
-      console.log(`  ${ANSI.green}\u2713${ANSI.reset} All required tables present`);
-    } else {
-      for (const error of validation.errors) {
-        console.log(`  ${ANSI.red}\u2717${ANSI.reset} ${error}`);
-        hasErrors = true;
-      }
-    }
-    console.log("");
-    console.log("SQLite Integrity:");
-    if (validation.integrityCheck) {
-      console.log(`  ${ANSI.green}\u2713${ANSI.reset} PRAGMA integrity_check passed`);
-    } else {
-      console.log(`  ${ANSI.red}\u2717${ANSI.reset} Integrity check failed`);
-      hasErrors = true;
-    }
-    console.log("");
-    console.log("FTS5 Full-Text Search:");
-    if (validation.fts5Available) {
-      console.log(`  ${ANSI.green}\u2713${ANSI.reset} FTS5 table available`);
-    } else {
-      console.log(`  ${ANSI.yellow}\u26A0${ANSI.reset} FTS5 not available (using LIKE fallback)`);
-    }
-    console.log("");
-    console.log("Embeddings:");
-    if (validation.embeddingDimension !== null) {
-      if (validation.embeddingDimension === 768) {
-        console.log(`  ${ANSI.green}\u2713${ANSI.reset} Embedding dimension: ${validation.embeddingDimension} (expected)`);
-      } else {
-        console.log(`  ${ANSI.yellow}\u26A0${ANSI.reset} Embedding dimension: ${validation.embeddingDimension} (expected 768)`);
-      }
-    } else {
-      console.log(`  ${ANSI.dim}No embeddings stored yet${ANSI.reset}`);
-    }
-    console.log("");
-    console.log("Backups:");
-    const backups = getBackupFiles();
-    if (backups.length > 0) {
-      console.log(`  ${ANSI.green}\u2713${ANSI.reset} ${backups.length} backup(s) available`);
-    } else {
-      console.log(`  ${ANSI.yellow}\u26A0${ANSI.reset} No backups found`);
-    }
-    if (validation.warnings.length > 0) {
-      console.log("");
-      console.log("Warnings:");
-      for (const warning of validation.warnings) {
-        console.log(`  ${ANSI.yellow}\u26A0${ANSI.reset} ${warning}`);
-      }
-    }
-    console.log("");
-    console.log("--------------------------------");
-    if (hasErrors) {
-      console.log(`${ANSI.red}Database has errors. Consider restoring from backup.${ANSI.reset}`);
+  let attempts = 0;
+  let handlingBindError = false;
+  const MAX_ATTEMPTS = 3;
+  server.on("error", (error) => {
+    if (error.code !== "EADDRINUSE") {
+      console.error(`[cortex-daemon] Server error: ${error.message}`);
       process.exit(1);
-    } else if (validation.warnings.length > 0) {
-      console.log(`${ANSI.yellow}Database is functional with ${validation.warnings.length} warning(s).${ANSI.reset}`);
-    } else {
-      console.log(`${ANSI.green}Database is healthy.${ANSI.reset}`);
     }
-  } catch (error) {
-    console.log(`${ANSI.red}\u2717 Failed to check database: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
-    process.exit(1);
-  }
+    if (handlingBindError)
+      return;
+    handlingBindError = true;
+    void (async () => {
+      const occupant = await getDaemonHealth(600);
+      if (occupant && occupant.version === VERSION) {
+        process.exit(0);
+      }
+      attempts++;
+      if (attempts >= MAX_ATTEMPTS) {
+        console.error(`[cortex-daemon] Port ${port} is busy and could not be reclaimed`);
+        process.exit(1);
+      }
+      if (occupant) {
+        await stopDaemon();
+      }
+      setTimeout(() => {
+        handlingBindError = false;
+        server.listen(port, "127.0.0.1");
+      }, 750);
+    })();
+  });
+  server.listen(port, "127.0.0.1", () => {
+    writeDaemonInfo(port);
+    console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    void getDb().catch((error) => {
+      console.error(`[cortex-daemon] Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    });
+  });
 }
-var isDirectRun = process.argv[1]?.endsWith("index.js") || process.argv[1]?.endsWith("index.ts") || process.env.CORTEX_CLI === "1";
-var isTestImport = process.argv[1]?.includes("node:test") || process.argv[1]?.includes("/test") || process.env.NODE_TEST_CONTEXT;
-if (isDirectRun || !isTestImport && process.argv.length > 1) {
-  main();
-}
-export {
-  archiveSession,
-  buildCortexStatuslineCommand,
-  closeDb,
-  configureClaudeStatusline,
-  formatDuration,
-  getContextPercent,
-  getProjectId,
-  handleCheckDb,
-  handleConfigure,
-  handlePostTool,
-  handlePreCompact,
-  handleRecall,
-  handleSave,
-  handleSessionEnd,
-  handleSessionStart,
-  handleSetup,
-  handleStats,
-  handleStatusline,
-  hybridSearch,
-  initDb,
-  loadAutoSaveState,
-  markAutoSaved,
-  readStdinWithResult,
-  resetAutoSaveState,
-  shouldAutoSave
-};
+main().catch((error) => {
+  console.error("[cortex-daemon] Fatal:", error);
+  process.exit(1);
+});
