@@ -197,6 +197,12 @@ Config file: `~/.cortex/config.json`
     "enabled": false,
     "userName": null,
     "timezone": null
+  },
+  "backup": {
+    "enabled": false,
+    "remote": null,
+    "intervalMinutes": 1440,
+    "keep": 7
   }
 }
 ```
@@ -208,6 +214,23 @@ Config file: `~/.cortex/config.json`
 - `autoClearEnabled`: Enable automatic context clear (default: false)
 - `restorationTokenBudget`: Max tokens for restoration context (default: 1000)
 - `restorationMessageCount`: Messages to restore after clear (default: 5)
+
+### Remote Backup Settings
+
+Opt-in gzip snapshots of the database uploaded to an rclone remote (Google
+Drive, S3, Dropbox, ...). Requires `rclone` on PATH with a configured remote
+(`rclone config`).
+
+- `backup.enabled`: enable scheduled backups — the daemon runs the schedule (default: false)
+- `backup.remote`: rclone remote path, e.g. `"gdrive:cortex-backups"` (default: null)
+- `backup.intervalMinutes`: minutes between scheduled backups (default: 1440 = daily)
+- `backup.keep`: remote snapshots to retain; older rotated out (default: 7)
+
+Manual: `node dist/index.js backup` (`--status` shows last-backup info).
+With a daemon running, backups route through its `POST /backup` endpoint
+(consistent `VACUUM INTO` snapshot serialized behind other writes); without
+one, the CLI snapshots the file directly. On daemon shutdown a due backup is
+handed to a detached `backup --if-due` child. State: `~/.cortex/backup-state.json`.
 
 ## Setup Flow
 

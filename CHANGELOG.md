@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.3.0
+
+### Features
+
+- **Opt-in remote backup (Google Drive & any rclone remote).** Periodic gzip
+  snapshots of the database uploaded to an rclone remote with configurable
+  rotation. Configure `backup.remote` (e.g. `"gdrive:cortex-backups"`) and
+  `backup.enabled` in `~/.cortex/config.json`; requires `rclone` on PATH with
+  a configured remote. In daemon mode the daemon runs the schedule
+  (`backup.intervalMinutes`, default daily) via a new `POST /backup` endpoint
+  and hands off a due backup on shutdown to a detached child. Without a
+  daemon, run `node dist/index.js backup` manually (`--status` shows the last
+  backup). Snapshots are consistent regardless of backend: `VACUUM INTO` on
+  native/WAL, in-memory export on sql.js. Old remote snapshots beyond
+  `backup.keep` (default 7) are rotated out. State: `~/.cortex/backup-state.json`.
+
 ## 2.2.0
 
 ### Features

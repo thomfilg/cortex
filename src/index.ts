@@ -13,6 +13,7 @@ import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, formatSearchResults } from './search.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
 import { startSession, recordSavePoint } from './analytics.js';
+import { runBackup, isBackupDue, loadBackupState, getBackupStatePath, type BackupResult } from './backup.js';
 import type { StdinData, CommandName, Config } from './types.js';
 
 // ============================================================================
@@ -146,6 +147,10 @@ async function main() {
 
       case 'compact':
         await handleCompact(args.slice(1));
+        break;
+
+      case 'backup':
+        await handleBackup(args.slice(1));
         break;
 
       case 'configure':
@@ -1266,6 +1271,90 @@ async function handleCompact(args: string[]) {
   }
 }
 
+/**
+ * Remote backup: snapshot -> gzip -> rclone upload -> rotate.
+ * Routes through the daemon when one is running (consistent snapshot from
+ * the live handle); otherwise snapshots straight from the file.
+ * Flags: --status (show last backup), --if-due (exit quietly unless the
+ * scheduled interval has elapsed), --direct (skip the daemon and snapshot
+ * from the file - used by the daemon's shutdown handoff, whose DB handle
+ * is already closed while its port is still briefly open).
+ */
+async function handleBackup(args: string[]) {
+  const config = loadConfig();
+  const ifDue = args.includes('--if-due');
+  const direct = args.includes('--direct');
+
+  if (args.includes('--status')) {
+    const state = loadBackupState();
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} Cortex Backup`);
+    console.log(`  Scheduled: ${config.backup.enabled ? `${ANSI.green}enabled${ANSI.reset} (every ${config.backup.intervalMinutes}min, keep ${config.backup.keep})` : 'disabled'}`);
+    console.log(`  Remote:    ${config.backup.remote ?? `${ANSI.yellow}not configured${ANSI.reset}`}`);
+    if (state.lastBackupAt) {
+      console.log(`  Last:      ${state.lastBackupAt} (${state.lastResult})${state.lastRemoteName ? ` ${ANSI.dim}${state.lastRemoteName}${ANSI.reset}` : ''}`);
+    } else {
+      console.log('  Last:      never');
+    }
+    if (state.lastError) {
+      console.log(`  ${ANSI.red}Error: ${state.lastError}${ANSI.reset}`);
+    }
+    return;
+  }
+
+  if (!config.backup.remote) {
+    if (ifDue) return;
+    console.log(`${ANSI.yellow}⚠ No backup remote configured.${ANSI.reset}`);
+    console.log('  1. Install rclone and run `rclone config` to add a remote (e.g. Google Drive as "gdrive")');
+    console.log('  2. Set backup.remote in ~/.cortex/config.json, e.g. "gdrive:cortex-backups"');
+    console.log('  3. Optionally set backup.enabled=true for scheduled backups (daemon mode)');
+    process.exitCode = 1;
+    return;
+  }
+
+  if (ifDue && !isBackupDue(config.backup)) {
+    return;
+  }
+
+  console.log(`${ANSI.brick}Ψ${ANSI.reset} Backing up to ${config.backup.remote}...`);
+
+  let result: BackupResult | null = null;
+  const health = direct ? null : await getDaemonHealth();
+  if (health) {
+    // A daemon owns the database - snapshot through it (upload of a large
+    // snapshot can take a while, so allow a long timeout). A pre-backup
+    // daemon (older version) 404s the route - fall through to the local
+    // path, which snapshots safely via VACUUM INTO on a second connection.
+    try {
+      result = (await daemonFetch('/backup', {
+        method: 'POST',
+        timeoutMs: 20 * 60 * 1000,
+      })) as BackupResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('404')) {
+        console.log(`${ANSI.red}Backup via daemon failed: ${message}${ANSI.reset}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+  }
+
+  if (!result) {
+    try {
+      result = await runBackup();
+    } catch (error) {
+      console.log(`${ANSI.red}Backup failed: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  console.log(`  ${ANSI.green}✓${ANSI.reset} Uploaded ${result.remoteName} (${formatBytes(result.sizeBytes)} in ${Math.round(result.durationMs / 1000)}s)`);
+  if (result.rotatedOut.length > 0) {
+    console.log(`  ${ANSI.dim}Rotated out ${result.rotatedOut.length} old snapshot(s)${ANSI.reset}`);
+  }
+}
+
 async function handleCheckDb() {
   console.log(`${ANSI.brick}Ψ${ANSI.reset} Database Integrity Check`);
   console.log('================================');
@@ -1393,7 +1482,12 @@ export {
   readStdinWithResult,
   getContextPercent,
   getProjectId,
-  formatDuration
+  formatDuration,
+  // Export backup helpers for testing
+  runBackup,
+  isBackupDue,
+  loadBackupState,
+  getBackupStatePath
 };
 
 // Run main only when executed directly (not when imported)

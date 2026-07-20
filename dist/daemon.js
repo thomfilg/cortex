@@ -562,16 +562,16 @@ var require_sql_wasm = __commonJS({
           throw b;
         }, D = "", Ea, Fa;
         if (ca) {
-          var fs7 = __require("fs");
+          var fs8 = __require("fs");
           __require("path");
           D = __dirname + "/";
           Fa = (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs7.readFileSync(a);
+            return fs8.readFileSync(a);
           };
           Ea = async (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs7.readFileSync(a, void 0);
+            return fs8.readFileSync(a, void 0);
           };
           !f.thisProgram && 1 < process.argv.length && (Ca = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -898,7 +898,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs7.readSync(d, b, 0, 256);
+                  c = fs8.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2363,7 +2363,8 @@ var require_sql_wasm = __commonJS({
 
 // src/daemon.ts
 import * as http from "http";
-import * as fs6 from "fs";
+import * as fs7 from "fs";
+import { spawn } from "child_process";
 
 // src/database.ts
 var import_sql = __toESM(require_sql_wasm(), 1);
@@ -2853,8 +2854,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -2970,11 +2971,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -6455,6 +6456,12 @@ var DaemonConfigSchema = external_exports.object({
   port: external_exports.number().min(1024).max(65535),
   storage: external_exports.enum(["auto", "wasm"])
 });
+var BackupConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  remote: external_exports.string().nullable(),
+  intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
+  keep: external_exports.number().min(0).max(1e3)
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6462,7 +6469,8 @@ var ConfigSchema = external_exports.object({
   restoration: RestorationConfigSchema,
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
-  daemon: DaemonConfigSchema
+  daemon: DaemonConfigSchema,
+  backup: BackupConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6502,6 +6510,13 @@ var DEFAULT_DAEMON_CONFIG = {
   port: 4983,
   storage: "auto"
 };
+var DEFAULT_BACKUP_CONFIG = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 1440,
+  // daily
+  keep: 7
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6509,7 +6524,8 @@ var DEFAULT_CONFIG = {
   restoration: DEFAULT_RESTORATION_CONFIG,
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
-  daemon: DEFAULT_DAEMON_CONFIG
+  daemon: DEFAULT_DAEMON_CONFIG,
+  backup: DEFAULT_BACKUP_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -7628,8 +7644,8 @@ async function initEmbedder() {
   }
   initPromise2 = (async () => {
     try {
-      const pipeline = await loadTransformers();
-      embedder = await pipeline("feature-extraction", MODEL_NAME, {
+      const pipeline2 = await loadTransformers();
+      embedder = await pipeline2("feature-extraction", MODEL_NAME, {
         quantized: true
       });
       return embedder;
@@ -8552,7 +8568,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.2.0" ? "2.2.0" : "0.0.0-dev";
+var VERSION = "2.3.0" ? "2.3.0" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [
@@ -9184,12 +9200,12 @@ import * as fs5 from "fs";
 function getDaemonBaseUrl() {
   return `http://127.0.0.1:${getDaemonPort()}`;
 }
-async function daemonFetch(path3, options = {}) {
+async function daemonFetch(path4, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
+    const response = await fetch(`${getDaemonBaseUrl()}${path4}`, {
       method,
       headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
       body: body !== void 0 ? JSON.stringify(body) : void 0,
@@ -9198,7 +9214,7 @@ async function daemonFetch(path3, options = {}) {
     if (!response.ok && response.status !== 202) {
       const errBody = await response.text().catch(() => "");
       throw new Error(
-        `Daemon responded ${response.status} for ${path3}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
+        `Daemon responded ${response.status} for ${path4}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
       );
     }
     const text = await response.text();
@@ -9234,6 +9250,188 @@ async function stopDaemon() {
     }
   }
   return requested;
+}
+
+// src/backup.ts
+import * as fs6 from "fs";
+import * as path3 from "path";
+import * as zlib from "zlib";
+import { pipeline } from "stream/promises";
+import { execFile } from "child_process";
+var RCLONE_TIMEOUT_MS = 15 * 60 * 1e3;
+var SNAPSHOT_PREFIX = "memory-";
+var SNAPSHOT_SUFFIX = ".db.gz";
+var EMPTY_STATE = {
+  lastBackupAt: null,
+  lastResult: null,
+  lastError: null,
+  lastRemoteName: null,
+  lastSizeBytes: null,
+  lastDurationMs: null
+};
+function getBackupStatePath() {
+  return path3.join(getDataDir(), "backup-state.json");
+}
+function loadBackupState() {
+  try {
+    const raw = fs6.readFileSync(getBackupStatePath(), "utf8");
+    return { ...EMPTY_STATE, ...JSON.parse(raw) };
+  } catch {
+    return { ...EMPTY_STATE };
+  }
+}
+function saveBackupState(state) {
+  try {
+    fs6.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
+  } catch {
+  }
+}
+function isBackupDue(config) {
+  if (!config.enabled || !config.remote)
+    return false;
+  const state = loadBackupState();
+  if (state.lastResult !== "ok" || !state.lastBackupAt)
+    return true;
+  const elapsed = Date.now() - new Date(state.lastBackupAt).getTime();
+  return elapsed >= config.intervalMinutes * 60 * 1e3;
+}
+function rclone(args, timeoutMs = RCLONE_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    execFile("rclone", args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`rclone ${args[0]} failed: ${stderr?.trim() || error.message}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+async function rcloneAvailable() {
+  try {
+    await rclone(["version"], 5e3);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function snapshotTmpDir() {
+  const dir = path3.join(getDataDir(), "backup-tmp");
+  fs6.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function snapshotName() {
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/\.\d+Z$/, "").replace(/:/g, "-");
+  return `${SNAPSHOT_PREFIX}${stamp}${SNAPSHOT_SUFFIX}`;
+}
+function createSnapshotFromDb(db, kind, outPath) {
+  if (kind === "native") {
+    if (fs6.existsSync(outPath))
+      fs6.unlinkSync(outPath);
+    db.run("VACUUM INTO ?", [outPath]);
+  } else {
+    fs6.writeFileSync(outPath, db.export());
+  }
+}
+async function createSnapshotFromFile(outPath) {
+  const dbPath = getDatabasePath();
+  if (!fs6.existsSync(dbPath)) {
+    throw new Error(`Database not found at ${dbPath}`);
+  }
+  const native = await tryOpenNative(dbPath);
+  if (native) {
+    try {
+      if (fs6.existsSync(outPath))
+        fs6.unlinkSync(outPath);
+      native.run("VACUUM INTO ?", [outPath]);
+      return;
+    } finally {
+      native.close();
+    }
+  }
+  fs6.copyFileSync(dbPath, outPath);
+}
+async function gzipFile(srcPath, destPath) {
+  await pipeline(
+    fs6.createReadStream(srcPath),
+    zlib.createGzip({ level: 6 }),
+    fs6.createWriteStream(destPath)
+  );
+}
+async function rotateRemote(remote, keep) {
+  if (keep <= 0)
+    return [];
+  let listing;
+  try {
+    listing = JSON.parse(await rclone(["lsjson", "--files-only", "--", remote]));
+  } catch {
+    return [];
+  }
+  const snapshots = listing.map((e) => e.Name).filter((n) => n.startsWith(SNAPSHOT_PREFIX) && n.endsWith(SNAPSHOT_SUFFIX)).sort().reverse();
+  const excess = snapshots.slice(keep);
+  const removed = [];
+  for (const name of excess) {
+    try {
+      await rclone(["deletefile", `${remote}/${name}`]);
+      removed.push(name);
+    } catch {
+    }
+  }
+  return removed;
+}
+async function runBackup(source = {}) {
+  const config = loadConfig().backup;
+  if (!config.remote) {
+    throw new Error('No backup remote configured (set backup.remote, e.g. "gdrive:cortex-backups")');
+  }
+  if (!await rcloneAvailable()) {
+    throw new Error("rclone not found on PATH - install it and run `rclone config` to add your remote");
+  }
+  const started = Date.now();
+  const tmpDir = snapshotTmpDir();
+  const name = snapshotName();
+  const rawPath = path3.join(tmpDir, name.replace(/\.gz$/, ""));
+  const gzPath = path3.join(tmpDir, name);
+  try {
+    if (source.db && source.kind) {
+      createSnapshotFromDb(source.db, source.kind, rawPath);
+    } else {
+      await createSnapshotFromFile(rawPath);
+    }
+    await gzipFile(rawPath, gzPath);
+    const sizeBytes = fs6.statSync(gzPath).size;
+    await rclone(["copyto", gzPath, `${config.remote}/${name}`]);
+    const rotatedOut = await rotateRemote(config.remote, config.keep);
+    const result = {
+      remoteName: name,
+      sizeBytes,
+      durationMs: Date.now() - started,
+      rotatedOut
+    };
+    saveBackupState({
+      lastBackupAt: (/* @__PURE__ */ new Date()).toISOString(),
+      lastResult: "ok",
+      lastError: null,
+      lastRemoteName: name,
+      lastSizeBytes: sizeBytes,
+      lastDurationMs: result.durationMs
+    });
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    saveBackupState({
+      ...loadBackupState(),
+      lastResult: "error",
+      lastError: message
+    });
+    throw error;
+  } finally {
+    for (const p of [rawPath, gzPath]) {
+      try {
+        fs6.unlinkSync(p);
+      } catch {
+      }
+    }
+  }
 }
 
 // src/daemon.ts
@@ -9422,6 +9620,12 @@ async function handleRequest(req, res) {
       respondJson(res, 200, { ...report, storage: getStorageKind() });
       return;
     }
+    case "POST /backup": {
+      const db = await getDb();
+      const result = await enqueue(() => runBackup({ db, kind: getStorageKind() }));
+      respondJson(res, 200, result);
+      return;
+    }
     case "POST /shutdown": {
       respondJson(res, 200, { shuttingDown: true });
       setTimeout(() => shutdown(0), 50);
@@ -9434,7 +9638,7 @@ async function handleRequest(req, res) {
 }
 function writeDaemonInfo(port) {
   try {
-    fs6.writeFileSync(
+    fs7.writeFileSync(
       getDaemonInfoPath(),
       JSON.stringify({ pid: process.pid, port, version: VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)
     );
@@ -9444,12 +9648,45 @@ function writeDaemonInfo(port) {
 function removeDaemonInfo() {
   try {
     const infoPath = getDaemonInfoPath();
-    if (fs6.existsSync(infoPath)) {
-      const info = JSON.parse(fs6.readFileSync(infoPath, "utf8"));
+    if (fs7.existsSync(infoPath)) {
+      const info = JSON.parse(fs7.readFileSync(infoPath, "utf8"));
       if (info.pid === process.pid) {
-        fs6.unlinkSync(infoPath);
+        fs7.unlinkSync(infoPath);
       }
     }
+  } catch {
+  }
+}
+var BACKUP_CHECK_INTERVAL_MS = 5 * 60 * 1e3;
+var backupRunning = false;
+function startBackupScheduler() {
+  const timer = setInterval(() => {
+    if (shuttingDown || backupRunning || !isBackupDue(loadConfig().backup))
+      return;
+    backupRunning = true;
+    void getDb().then((db) => enqueue(() => runBackup({ db, kind: getStorageKind() }))).then((result) => {
+      console.error(`[cortex-daemon] Backup uploaded: ${result.remoteName} (${Math.round(result.sizeBytes / 1024 / 1024)}MB in ${Math.round(result.durationMs / 1e3)}s)`);
+    }).catch((error) => {
+      console.error(`[cortex-daemon] Backup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      backupRunning = false;
+    });
+  }, BACKUP_CHECK_INTERVAL_MS);
+  timer.unref();
+}
+function spawnShutdownBackup() {
+  try {
+    if (!isBackupDue(loadConfig().backup))
+      return;
+    const indexPath = decodeURIComponent(new URL("./index.js", import.meta.url).pathname);
+    if (!fs7.existsSync(indexPath))
+      return;
+    const child = spawn(process.execPath, [indexPath, "backup", "--if-due", "--direct"], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env
+    });
+    child.unref();
   } catch {
   }
 }
@@ -9464,6 +9701,7 @@ function shutdown(code) {
     }
   } catch {
   }
+  spawnShutdownBackup();
   removeDaemonInfo();
   process.exit(code);
 }
@@ -9514,6 +9752,7 @@ async function main() {
   server.listen(port, "127.0.0.1", () => {
     writeDaemonInfo(port);
     console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    startBackupScheduler();
     void getDb().catch((error) => {
       console.error(`[cortex-daemon] Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);
       process.exit(1);

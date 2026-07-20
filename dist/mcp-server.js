@@ -6454,6 +6454,12 @@ var DaemonConfigSchema = external_exports.object({
   port: external_exports.number().min(1024).max(65535),
   storage: external_exports.enum(["auto", "wasm"])
 });
+var BackupConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  remote: external_exports.string().nullable(),
+  intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
+  keep: external_exports.number().min(0).max(1e3)
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6461,7 +6467,8 @@ var ConfigSchema = external_exports.object({
   restoration: RestorationConfigSchema,
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
-  daemon: DaemonConfigSchema
+  daemon: DaemonConfigSchema,
+  backup: BackupConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6501,6 +6508,13 @@ var DEFAULT_DAEMON_CONFIG = {
   port: 4983,
   storage: "auto"
 };
+var DEFAULT_BACKUP_CONFIG = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 1440,
+  // daily
+  keep: 7
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6508,7 +6522,8 @@ var DEFAULT_CONFIG = {
   restoration: DEFAULT_RESTORATION_CONFIG,
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
-  daemon: DEFAULT_DAEMON_CONFIG
+  daemon: DEFAULT_DAEMON_CONFIG,
+  backup: DEFAULT_BACKUP_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -8255,7 +8270,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.2.0" ? "2.2.0" : "0.0.0-dev";
+var VERSION = "2.3.0" ? "2.3.0" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [
