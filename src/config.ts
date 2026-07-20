@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { z } from 'zod';
-import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig } from './types.js';
+import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig, SyncConfig } from './types.js';
 
 // ============================================================================
 // Zod Schemas for Config Validation
@@ -65,6 +65,13 @@ const BackupConfigSchema = z.object({
   keep: z.number().min(0).max(1000),
 });
 
+const SyncConfigSchema = z.object({
+  enabled: z.boolean(),
+  remote: z.string().nullable(),
+  intervalMinutes: z.number().min(5).max(60 * 24 * 30),
+  projects: z.array(z.string()).nullable(),
+});
+
 const ConfigSchema = z.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -74,6 +81,7 @@ const ConfigSchema = z.object({
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
+  sync: SyncConfigSchema,
 });
 
 // ============================================================================
@@ -133,6 +141,15 @@ export const DEFAULT_BACKUP_CONFIG: BackupConfig = {
   keep: 7,
 };
 
+// Memory sync is opt-in: needs a shared rclone remote and identical
+// embedding models on every participating device
+export const DEFAULT_SYNC_CONFIG: SyncConfig = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 60,
+  projects: null,
+};
+
 export const DEFAULT_CONFIG: Config = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -142,6 +159,7 @@ export const DEFAULT_CONFIG: Config = {
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
+  sync: DEFAULT_SYNC_CONFIG,
 };
 
 // ============================================================================

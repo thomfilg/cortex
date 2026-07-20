@@ -6460,6 +6460,12 @@ var BackupConfigSchema = external_exports.object({
   intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
   keep: external_exports.number().min(0).max(1e3)
 });
+var SyncConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  remote: external_exports.string().nullable(),
+  intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
+  projects: external_exports.array(external_exports.string()).nullable()
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6468,7 +6474,8 @@ var ConfigSchema = external_exports.object({
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
-  backup: BackupConfigSchema
+  backup: BackupConfigSchema,
+  sync: SyncConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6515,6 +6522,12 @@ var DEFAULT_BACKUP_CONFIG = {
   // daily
   keep: 7
 };
+var DEFAULT_SYNC_CONFIG = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 60,
+  projects: null
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6523,7 +6536,8 @@ var DEFAULT_CONFIG = {
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
-  backup: DEFAULT_BACKUP_CONFIG
+  backup: DEFAULT_BACKUP_CONFIG,
+  sync: DEFAULT_SYNC_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -7002,7 +7016,19 @@ function createSchema(db, options = {}) {
       project_id TEXT,
       source_session TEXT NOT NULL,
       timestamp TEXT NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      origin_device TEXT
+    )
+  `);
+  try {
+    db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
+  } catch {
+  }
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      content_hash TEXT PRIMARY KEY,
+      deleted_at TEXT NOT NULL,
+      origin_device TEXT
     )
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
@@ -7163,9 +7189,34 @@ function contentExists(db, content) {
   );
   return result.length > 0 && result[0].values.length > 0;
 }
+function recordTombstone(db, contentHash, originDevice = null) {
+  db.run(
+    `INSERT OR REPLACE INTO sync_tombstones (content_hash, deleted_at, origin_device) VALUES (?, ?, ?)`,
+    [contentHash, (/* @__PURE__ */ new Date()).toISOString(), originDevice]
+  );
+}
 function deleteMemory(db, id) {
-  db.run(`DELETE FROM memories WHERE id = ?`, [id]);
-  return db.getRowsModified() > 0;
+  const existing = db.exec(`SELECT content_hash FROM memories WHERE id = ?`, [id]);
+  if (existing.length === 0 || existing[0].values.length === 0) {
+    return false;
+  }
+  const hash = existing[0].values[0][0];
+  db.run("BEGIN");
+  try {
+    db.run(`DELETE FROM memories WHERE id = ?`, [id]);
+    const deleted = db.getRowsModified() > 0;
+    if (deleted) {
+      recordTombstone(db, hash);
+    }
+    db.run("COMMIT");
+    return deleted;
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+    }
+    throw error;
+  }
 }
 function storeManualMemory(db, content, embedding, projectId, context) {
   const fullContent = context ? `${content}
@@ -7182,11 +7233,17 @@ function storeManualMemory(db, content, embedding, projectId, context) {
 }
 function updateMemory(db, id, newContent, newEmbedding) {
   const newHash = hashContent(newContent);
+  const existing = db.exec(`SELECT content_hash FROM memories WHERE id = ?`, [id]);
+  const oldHash = existing.length > 0 && existing[0].values.length > 0 ? existing[0].values[0][0] : null;
   db.run(
-    `UPDATE memories SET content = ?, content_hash = ?, embedding = ? WHERE id = ?`,
+    `UPDATE memories SET content = ?, content_hash = ?, embedding = ?, origin_device = NULL WHERE id = ?`,
     [newContent, newHash, embeddingToBuffer(newEmbedding), id]
   );
-  return db.getRowsModified() > 0;
+  const updated = db.getRowsModified() > 0;
+  if (updated && oldHash && oldHash !== newHash) {
+    recordTombstone(db, oldHash);
+  }
+  return updated;
 }
 function updateMemoryProjectId(db, id, newProjectId) {
   db.run(
@@ -7201,6 +7258,27 @@ function renameProject(db, oldProjectId, newProjectId) {
     [newProjectId, oldProjectId]
   );
   return db.getRowsModified();
+}
+function deleteProjectMemories(db, projectId) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  db.run("BEGIN");
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO sync_tombstones (content_hash, deleted_at, origin_device)
+       SELECT content_hash, ?, NULL FROM memories WHERE project_id = ?`,
+      [now, projectId]
+    );
+    db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+    const deleted = db.getRowsModified();
+    db.run("COMMIT");
+    return deleted;
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+    }
+    throw error;
+  }
 }
 function searchByVector(db, queryEmbedding, projectId, limit = 10) {
   let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
@@ -8270,7 +8348,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.3.0" ? "2.3.0" : "0.0.0-dev";
+var VERSION = "2.4.0" ? "2.4.0" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [
@@ -8739,8 +8817,7 @@ async function handleForgetProject(db, params) {
       message: `This will delete ${projectStats.fragmentCount} memories from ${projectId}. Call cortex_forget_project with confirm: true to proceed.`
     };
   }
-  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
-  const deletedCount = db.getRowsModified();
+  const deletedCount = deleteProjectMemories(db, projectId);
   saveDb(db);
   return {
     success: true,

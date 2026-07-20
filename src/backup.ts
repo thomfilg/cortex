@@ -85,7 +85,7 @@ export function isBackupDue(config: BackupConfig): boolean {
 // rclone
 // ============================================================================
 
-function rclone(args: string[], timeoutMs: number = RCLONE_TIMEOUT_MS): Promise<string> {
+export function rclone(args: string[], timeoutMs: number = RCLONE_TIMEOUT_MS): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile('rclone', args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {

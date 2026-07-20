@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.4.0
+
+### Features
+
+- **Opt-in bidirectional memory sync across machines and team members.**
+  Share the memory database between computers through the same rclone remote
+  used for backups - without file-level sync (which would be last-writer-wins
+  and destroy concurrent work). Each device appends only its own changelog
+  files (`<sync.remote>/<deviceId>/<seq>.jsonl.gz`), so there are no write
+  conflicts by construction; reconciliation is set-union on `content_hash`
+  plus tombstones for deletions. `cortex_delete`, `cortex_update`, and
+  `cortex_forget_project` now record tombstones so deletions propagate and
+  deleted content is never re-imported. Configure `sync.remote` (e.g.
+  `"gdrive:cortex-sync"`) and `sync.enabled` in `~/.cortex/config.json`; the
+  daemon runs the schedule (`sync.intervalMinutes`, default hourly) via a new
+  `POST /sync` endpoint, or run `node dist/index.js sync` manually
+  (`--push`/`--pull`/`--status`). Optional `sync.projects` allowlist limits
+  which projects are pushed (e.g. for team sharing). All devices must use the
+  same embedding model. Schema migration adds `memories.origin_device` and a
+  `sync_tombstones` table automatically.
+
 ## 2.3.0
 
 ### Features

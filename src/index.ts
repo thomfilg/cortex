@@ -8,12 +8,13 @@ import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSet
 import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, daemonFetch, type DaemonStats } from './daemon-client.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
-import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind } from './database.js';
+import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, formatSearchResults } from './search.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
 import { startSession, recordSavePoint } from './analytics.js';
 import { runBackup, isBackupDue, loadBackupState, getBackupStatePath, type BackupResult } from './backup.js';
+import { runSync, isSyncDue, loadSyncState, getSyncStatePath, ensureDeviceId, type SyncResult } from './sync.js';
 import type { StdinData, CommandName, Config } from './types.js';
 
 // ============================================================================
@@ -151,6 +152,10 @@ async function main() {
 
       case 'backup':
         await handleBackup(args.slice(1));
+        break;
+
+      case 'sync':
+        await handleSync(args.slice(1));
         break;
 
       case 'configure':
@@ -1355,6 +1360,96 @@ async function handleBackup(args: string[]) {
   }
 }
 
+/**
+ * Bidirectional memory sync through a shared rclone remote.
+ * Routes through the daemon when one is running (sync writes to the DB and
+ * must be serialized with other writers). Without a daemon, syncs locally.
+ * Flags: --status, --push (push only), --pull (pull only).
+ */
+async function handleSync(args: string[]) {
+  const config = loadConfig();
+
+  if (args.includes('--status')) {
+    const state = loadSyncState();
+    console.log(`${ANSI.brick}Ψ${ANSI.reset} Cortex Sync`);
+    console.log(`  Scheduled: ${config.sync.enabled ? `${ANSI.green}enabled${ANSI.reset} (every ${config.sync.intervalMinutes}min)` : 'disabled'}`);
+    console.log(`  Remote:    ${config.sync.remote ?? `${ANSI.yellow}not configured${ANSI.reset}`}`);
+    console.log(`  Device:    ${state.deviceId ?? `${ANSI.dim}(assigned on first sync)${ANSI.reset}`}`);
+    console.log(`  Projects:  ${config.sync.projects ? config.sync.projects.join(', ') : 'all'}`);
+    if (state.lastSyncAt) {
+      console.log(`  Last:      ${state.lastSyncAt} (${state.lastResult})`);
+    } else {
+      console.log('  Last:      never');
+    }
+    const peerNames = Object.keys(state.peers);
+    if (peerNames.length > 0) {
+      console.log(`  Peers:     ${peerNames.map((p) => `${p} (seq ${state.peers[p]})`).join(', ')}`);
+    }
+    if (state.lastError) {
+      console.log(`  ${ANSI.red}Error: ${state.lastError}${ANSI.reset}`);
+    }
+    return;
+  }
+
+  if (!config.sync.remote) {
+    console.log(`${ANSI.yellow}⚠ No sync remote configured.${ANSI.reset}`);
+    console.log('  1. Install rclone and run `rclone config` to add a remote (shared by all devices)');
+    console.log('  2. Set sync.remote in ~/.cortex/config.json, e.g. "gdrive:cortex-sync"');
+    console.log('  3. Optionally set sync.enabled=true for scheduled syncs (daemon mode)');
+    console.log('  All devices must use the same embedding model.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const options = {
+    push: !args.includes('--pull'),
+    pull: !args.includes('--push'),
+  };
+
+  console.log(`${ANSI.brick}Ψ${ANSI.reset} Syncing with ${config.sync.remote}...`);
+
+  let result: SyncResult;
+  const health = await getDaemonHealth();
+  if (health) {
+    // A daemon owns the database - sync must go through it. Unlike backup
+    // there is no safe local fallback: sync WRITES, and a concurrent
+    // full-file save from the daemon would clobber those writes.
+    try {
+      result = (await daemonFetch('/sync', {
+        method: 'POST',
+        body: options,
+        timeoutMs: 30 * 60 * 1000,
+      })) as SyncResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('404')) {
+        console.log(`${ANSI.red}The running daemon (v${health.version}) predates sync support. Restart it (node dist/index.js daemon-stop) and retry.${ANSI.reset}`);
+      } else {
+        console.log(`${ANSI.red}Sync via daemon failed: ${message}${ANSI.reset}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    try {
+      const db = await initDb();
+      result = await runSync(db, options);
+      saveDb(db);
+    } catch (error) {
+      console.log(`${ANSI.red}Sync failed: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  console.log(`  ${ANSI.green}✓${ANSI.reset} Device ${result.deviceId} synced in ${Math.round(result.durationMs / 1000)}s`);
+  console.log(`  Pushed: ${result.pushed.memories} memories, ${result.pushed.tombstones} deletions (${result.pushed.files} file(s))`);
+  console.log(`  Pulled: ${result.pulled.added} memories, ${result.pulled.deleted} deletions from ${result.pulled.peers.length} peer(s)`);
+  for (const err of result.pulled.errors ?? []) {
+    console.log(`  ${ANSI.yellow}⚠ Peer skipped this run: ${err}${ANSI.reset}`);
+  }
+}
+
 async function handleCheckDb() {
   console.log(`${ANSI.brick}Ψ${ANSI.reset} Database Integrity Check`);
   console.log('================================');
@@ -1487,7 +1582,16 @@ export {
   runBackup,
   isBackupDue,
   loadBackupState,
-  getBackupStatePath
+  getBackupStatePath,
+  // Export sync helpers for testing
+  runSync,
+  isSyncDue,
+  loadSyncState,
+  getSyncStatePath,
+  ensureDeviceId,
+  insertMemory,
+  deleteMemory,
+  saveDb
 };
 
 // Run main only when executed directly (not when imported)

@@ -180,6 +180,22 @@ export interface BackupConfig {
   keep: number;
 }
 
+/**
+ * Opt-in bidirectional memory sync through a shared rclone remote.
+ * Each device appends only its own changelog files; reconciliation is
+ * set-union on content_hash plus tombstones for deletions. All devices
+ * must use the same embedding model. Default: disabled.
+ */
+export interface SyncConfig {
+  enabled: boolean;
+  /** rclone remote path for changelogs, e.g. "gdrive:cortex-sync". null = unconfigured */
+  remote: string | null;
+  /** Minutes between scheduled syncs (daemon mode) */
+  intervalMinutes: number;
+  /** Only push memories from these projects (null = all). Pulls are unfiltered. */
+  projects: string[] | null;
+}
+
 export interface Config {
   statusline: StatuslineConfig;
   archive: ArchiveConfig;
@@ -189,6 +205,7 @@ export interface Config {
   awareness: AwarenessConfig;
   daemon: DaemonConfig;
   backup: BackupConfig;
+  sync: SyncConfig;
 }
 
 // ============================================================================
@@ -276,7 +293,8 @@ export type CommandName =
   | 'daemon-status'
   | 'daemon-stop'
   | 'compact'
-  | 'backup';
+  | 'backup'
+  | 'sync';
 
 // ============================================================================
 // Analytics Types

@@ -562,16 +562,16 @@ var require_sql_wasm = __commonJS({
           throw b;
         }, D = "", Ea, Fa;
         if (ca) {
-          var fs7 = __require("fs");
+          var fs8 = __require("fs");
           __require("path");
           D = __dirname + "/";
           Fa = (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs7.readFileSync(a);
+            return fs8.readFileSync(a);
           };
           Ea = async (a) => {
             a = Ga(a) ? new URL(a) : a;
-            return fs7.readFileSync(a, void 0);
+            return fs8.readFileSync(a, void 0);
           };
           !f.thisProgram && 1 < process.argv.length && (Ca = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -898,7 +898,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs7.readSync(d, b, 0, 256);
+                  c = fs8.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2953,8 +2953,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path4, errorMaps, issueData } = params;
-  const fullPath = [...path4, ...issueData.path || []];
+  const { data, path: path5, errorMaps, issueData } = params;
+  const fullPath = [...path5, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -3070,11 +3070,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path4, key) {
+  constructor(parent, value, path5, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path4;
+    this._path = path5;
     this._key = key;
   }
   get path() {
@@ -6561,6 +6561,12 @@ var BackupConfigSchema = external_exports.object({
   intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
   keep: external_exports.number().min(0).max(1e3)
 });
+var SyncConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  remote: external_exports.string().nullable(),
+  intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
+  projects: external_exports.array(external_exports.string()).nullable()
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6569,7 +6575,8 @@ var ConfigSchema = external_exports.object({
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
-  backup: BackupConfigSchema
+  backup: BackupConfigSchema,
+  sync: SyncConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6616,6 +6623,12 @@ var DEFAULT_BACKUP_CONFIG = {
   // daily
   keep: 7
 };
+var DEFAULT_SYNC_CONFIG = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 60,
+  projects: null
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6624,7 +6637,8 @@ var DEFAULT_CONFIG = {
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
-  backup: DEFAULT_BACKUP_CONFIG
+  backup: DEFAULT_BACKUP_CONFIG,
+  sync: DEFAULT_SYNC_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -7044,18 +7058,18 @@ import { spawn } from "child_process";
 import * as fs2 from "fs";
 
 // src/version.ts
-var VERSION = "2.3.0" ? "2.3.0" : "0.0.0-dev";
+var VERSION = "2.4.0" ? "2.4.0" : "0.0.0-dev";
 
 // src/daemon-client.ts
 function getDaemonBaseUrl() {
   return `http://127.0.0.1:${getDaemonPort()}`;
 }
-async function daemonFetch(path4, options = {}) {
+async function daemonFetch(path5, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${getDaemonBaseUrl()}${path4}`, {
+    const response = await fetch(`${getDaemonBaseUrl()}${path5}`, {
       method,
       headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
       body: body !== void 0 ? JSON.stringify(body) : void 0,
@@ -7064,7 +7078,7 @@ async function daemonFetch(path4, options = {}) {
     if (!response.ok && response.status !== 202) {
       const errBody = await response.text().catch(() => "");
       throw new Error(
-        `Daemon responded ${response.status} for ${path4}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
+        `Daemon responded ${response.status} for ${path5}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
       );
     }
     const text = await response.text();
@@ -7540,7 +7554,19 @@ function createSchema(db, options = {}) {
       project_id TEXT,
       source_session TEXT NOT NULL,
       timestamp TEXT NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      origin_device TEXT
+    )
+  `);
+  try {
+    db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
+  } catch {
+  }
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      content_hash TEXT PRIMARY KEY,
+      deleted_at TEXT NOT NULL,
+      origin_device TEXT
     )
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
@@ -7689,6 +7715,35 @@ function contentExists(db, content) {
     [hash]
   );
   return result.length > 0 && result[0].values.length > 0;
+}
+function recordTombstone(db, contentHash, originDevice = null) {
+  db.run(
+    `INSERT OR REPLACE INTO sync_tombstones (content_hash, deleted_at, origin_device) VALUES (?, ?, ?)`,
+    [contentHash, (/* @__PURE__ */ new Date()).toISOString(), originDevice]
+  );
+}
+function deleteMemory(db, id) {
+  const existing = db.exec(`SELECT content_hash FROM memories WHERE id = ?`, [id]);
+  if (existing.length === 0 || existing[0].values.length === 0) {
+    return false;
+  }
+  const hash = existing[0].values[0][0];
+  db.run("BEGIN");
+  try {
+    db.run(`DELETE FROM memories WHERE id = ?`, [id]);
+    const deleted = db.getRowsModified() > 0;
+    if (deleted) {
+      recordTombstone(db, hash);
+    }
+    db.run("COMMIT");
+    return deleted;
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+    }
+    throw error;
+  }
 }
 function getRecentMemories(db, projectId, limit = 10) {
   let query = `SELECT id, content, project_id, timestamp FROM memories`;
@@ -9185,10 +9240,10 @@ async function runBackup(source = {}) {
     throw new Error("rclone not found on PATH - install it and run `rclone config` to add your remote");
   }
   const started = Date.now();
-  const tmpDir = snapshotTmpDir();
+  const tmpDir2 = snapshotTmpDir();
   const name = snapshotName();
-  const rawPath = path3.join(tmpDir, name.replace(/\.gz$/, ""));
-  const gzPath = path3.join(tmpDir, name);
+  const rawPath = path3.join(tmpDir2, name.replace(/\.gz$/, ""));
+  const gzPath = path3.join(tmpDir2, name);
   try {
     if (source.db && source.kind) {
       createSnapshotFromDb(source.db, source.kind, rawPath);
@@ -9232,10 +9287,270 @@ async function runBackup(source = {}) {
   }
 }
 
+// src/sync.ts
+import * as fs7 from "fs";
+import * as os3 from "os";
+import * as path4 from "path";
+import * as zlib2 from "zlib";
+import * as crypto3 from "crypto";
+var CHANGELOG_SUFFIX = ".jsonl.gz";
+var MAX_LINES_PER_FILE = 5e3;
+var SEQ_PAD = 8;
+var EMPTY_SYNC_STATE = {
+  deviceId: null,
+  lastSyncAt: null,
+  lastResult: null,
+  lastError: null,
+  lastPushedMemoryId: 0,
+  lastPushedTombstoneRowid: 0,
+  nextSeq: 1,
+  peers: {}
+};
+function getSyncStatePath() {
+  return path4.join(getDataDir(), "sync-state.json");
+}
+function loadSyncState() {
+  try {
+    const raw = fs7.readFileSync(getSyncStatePath(), "utf8");
+    const parsed = JSON.parse(raw);
+    return { ...EMPTY_SYNC_STATE, ...parsed, peers: { ...parsed.peers ?? {} } };
+  } catch {
+    return { ...EMPTY_SYNC_STATE, peers: {} };
+  }
+}
+function saveSyncState(state) {
+  fs7.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
+}
+function ensureDeviceId(state) {
+  if (state.deviceId)
+    return state.deviceId;
+  const host = os3.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
+  state.deviceId = `${host}-${crypto3.randomBytes(3).toString("hex")}`;
+  saveSyncState(state);
+  return state.deviceId;
+}
+function isSyncDue(config) {
+  if (!config.enabled || !config.remote)
+    return false;
+  const state = loadSyncState();
+  if (state.lastResult !== "ok" || !state.lastSyncAt)
+    return true;
+  return Date.now() - new Date(state.lastSyncAt).getTime() >= config.intervalMinutes * 60 * 1e3;
+}
+function tmpDir() {
+  const dir = path4.join(getDataDir(), "sync-tmp");
+  fs7.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function seqName(seq) {
+  return `${String(seq).padStart(SEQ_PAD, "0")}${CHANGELOG_SUFFIX}`;
+}
+function embeddingToBase64(value) {
+  return Buffer.from(value).toString("base64");
+}
+function collectLocalChanges(db, state, config) {
+  const entries = [];
+  let memoryQuery = `
+    SELECT id, content, content_hash, embedding, project_id, source_session, timestamp
+    FROM memories WHERE id > ? AND origin_device IS NULL`;
+  const params = [state.lastPushedMemoryId];
+  if (config.projects && config.projects.length > 0) {
+    memoryQuery += ` AND project_id IN (${config.projects.map(() => "?").join(",")})`;
+    params.push(...config.projects);
+  }
+  memoryQuery += ` ORDER BY id`;
+  const memoryRows = db.exec(memoryQuery, params);
+  if (memoryRows.length > 0) {
+    for (const row of memoryRows[0].values) {
+      entries.push({
+        memoryId: row[0],
+        line: {
+          t: "add",
+          h: row[2],
+          c: row[1],
+          e: embeddingToBase64(row[3]),
+          p: row[4],
+          s: row[5],
+          ts: row[6]
+        }
+      });
+    }
+  }
+  let scannedMaxMemoryId = state.lastPushedMemoryId;
+  const maxIdResult = db.exec(`SELECT COALESCE(MAX(id), 0) FROM memories WHERE origin_device IS NULL`);
+  if (maxIdResult.length > 0) {
+    scannedMaxMemoryId = Math.max(scannedMaxMemoryId, maxIdResult[0].values[0][0]);
+  }
+  const tombRows = db.exec(
+    `SELECT rowid, content_hash, deleted_at FROM sync_tombstones
+     WHERE rowid > ? AND origin_device IS NULL ORDER BY rowid`,
+    [state.lastPushedTombstoneRowid]
+  );
+  if (tombRows.length > 0) {
+    for (const row of tombRows[0].values) {
+      entries.push({
+        tombstoneRowid: row[0],
+        line: { t: "del", h: row[1], ts: row[2] }
+      });
+    }
+  }
+  return { entries, scannedMaxMemoryId };
+}
+async function pushChanges(db, state, config, remote) {
+  const deviceId = ensureDeviceId(state);
+  const { entries, scannedMaxMemoryId } = collectLocalChanges(db, state, config);
+  const result = {
+    memories: entries.filter((e) => e.line.t === "add").length,
+    tombstones: entries.filter((e) => e.line.t === "del").length,
+    files: 0
+  };
+  for (let offset = 0; offset < entries.length; offset += MAX_LINES_PER_FILE) {
+    const chunk = entries.slice(offset, offset + MAX_LINES_PER_FILE);
+    const name = seqName(state.nextSeq);
+    const localPath = path4.join(tmpDir(), name);
+    try {
+      const jsonl = chunk.map((e) => JSON.stringify(e.line)).join("\n") + "\n";
+      fs7.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
+      await rclone(["copyto", localPath, `${remote}/${deviceId}/${name}`]);
+    } finally {
+      try {
+        fs7.unlinkSync(localPath);
+      } catch {
+      }
+    }
+    state.nextSeq += 1;
+    result.files += 1;
+    for (const e of chunk) {
+      if (e.memoryId !== void 0) {
+        state.lastPushedMemoryId = Math.max(state.lastPushedMemoryId, e.memoryId);
+      }
+      if (e.tombstoneRowid !== void 0) {
+        state.lastPushedTombstoneRowid = Math.max(state.lastPushedTombstoneRowid, e.tombstoneRowid);
+      }
+    }
+    saveSyncState(state);
+  }
+  state.lastPushedMemoryId = Math.max(state.lastPushedMemoryId, scannedMaxMemoryId);
+  saveSyncState(state);
+  return result;
+}
+function applyLines(db, lines, peerDevice) {
+  let added = 0;
+  let deleted = 0;
+  db.run("BEGIN");
+  try {
+    for (const line of lines) {
+      if (line.t === "add") {
+        const tombstoned = db.exec(
+          `SELECT 1 FROM sync_tombstones WHERE content_hash = ? LIMIT 1`,
+          [line.h]
+        );
+        if (tombstoned.length > 0 && tombstoned[0].values.length > 0)
+          continue;
+        db.run(
+          `INSERT OR IGNORE INTO memories (content, content_hash, embedding, project_id, source_session, timestamp, origin_device)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [line.c, line.h, Buffer.from(line.e, "base64"), line.p, line.s, line.ts, peerDevice]
+        );
+        added += db.getRowsModified();
+      } else if (line.t === "del") {
+        db.run(`DELETE FROM memories WHERE content_hash = ?`, [line.h]);
+        deleted += db.getRowsModified();
+        db.run(
+          `INSERT OR IGNORE INTO sync_tombstones (content_hash, deleted_at, origin_device) VALUES (?, ?, ?)`,
+          [line.h, line.ts, peerDevice]
+        );
+      }
+    }
+    db.run("COMMIT");
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+    }
+    throw error;
+  }
+  return { added, deleted };
+}
+async function pullChanges(db, state, remote) {
+  const deviceId = ensureDeviceId(state);
+  const result = { added: 0, deleted: 0, files: 0, peers: [], errors: [] };
+  let dirs;
+  try {
+    dirs = JSON.parse(await rclone(["lsjson", "--dirs-only", "--", remote]));
+  } catch (error) {
+    if (error instanceof Error && /not found|directory not found/i.test(error.message)) {
+      return result;
+    }
+    throw error;
+  }
+  for (const dir of dirs) {
+    const peer = dir.Name;
+    if (!dir.IsDir || peer === deviceId)
+      continue;
+    try {
+      const files = JSON.parse(
+        await rclone(["lsjson", "--files-only", "--", `${remote}/${peer}`])
+      );
+      const pending = files.map((f) => f.Name).filter((n) => n.endsWith(CHANGELOG_SUFFIX)).map((n) => ({ name: n, seq: parseInt(n.slice(0, -CHANGELOG_SUFFIX.length), 10) })).filter((f) => Number.isFinite(f.seq) && f.seq > (state.peers[peer] ?? 0)).sort((a, b) => a.seq - b.seq);
+      if (pending.length > 0) {
+        result.peers.push(peer);
+      }
+      for (const file of pending) {
+        const localPath = path4.join(tmpDir(), `${peer}-${file.name}`);
+        let lines;
+        try {
+          await rclone(["copyto", `${remote}/${peer}/${file.name}`, localPath]);
+          const jsonl = zlib2.gunzipSync(fs7.readFileSync(localPath)).toString("utf8");
+          lines = jsonl.split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
+        } finally {
+          try {
+            fs7.unlinkSync(localPath);
+          } catch {
+          }
+        }
+        const applied = applyLines(db, lines, peer);
+        result.added += applied.added;
+        result.deleted += applied.deleted;
+        result.files += 1;
+        state.peers[peer] = file.seq;
+        saveSyncState(state);
+      }
+    } catch (error) {
+      result.errors.push(`${peer}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return result;
+}
+async function runSync(db, options = {}) {
+  const { push = true, pull = true } = options;
+  const config = loadConfig().sync;
+  if (!config.remote) {
+    throw new Error('No sync remote configured (set sync.remote, e.g. "gdrive:cortex-sync")');
+  }
+  const started = Date.now();
+  const state = loadSyncState();
+  const deviceId = ensureDeviceId(state);
+  try {
+    const pulled = pull ? await pullChanges(db, state, config.remote) : { added: 0, deleted: 0, files: 0, peers: [], errors: [] };
+    const pushed = push ? await pushChanges(db, state, config, config.remote) : { memories: 0, tombstones: 0, files: 0 };
+    state.lastSyncAt = (/* @__PURE__ */ new Date()).toISOString();
+    state.lastResult = "ok";
+    state.lastError = null;
+    saveSyncState(state);
+    return { deviceId, pushed, pulled, durationMs: Date.now() - started };
+  } catch (error) {
+    state.lastResult = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+    saveSyncState(state);
+    throw error;
+  }
+}
+
 // src/index.ts
-import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync3 } from "fs";
+import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync4 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 var ANSI = {
   reset: "\x1B[0m",
   bold: "\x1B[1m",
@@ -9251,14 +9566,14 @@ var ANSI = {
   // Claude terracotta/brick #D97757
 };
 var DEBUG_ENABLED = process.env.CORTEX_DEBUG === "1" || process.env.CORTEX_DEBUG === "true";
-var DEBUG_LOG_DIR = join4(homedir2(), ".cortex", "logs");
-var DEBUG_LOG_FILE = join4(DEBUG_LOG_DIR, "hook-debug.log");
+var DEBUG_LOG_DIR = join5(homedir2(), ".cortex", "logs");
+var DEBUG_LOG_FILE = join5(DEBUG_LOG_DIR, "hook-debug.log");
 function debugLog(context, message, data) {
   if (!DEBUG_ENABLED)
     return;
   try {
     if (!existsSync7(DEBUG_LOG_DIR)) {
-      mkdirSync3(DEBUG_LOG_DIR, { recursive: true });
+      mkdirSync4(DEBUG_LOG_DIR, { recursive: true });
     }
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
     const logEntry = `[${timestamp}] [${context}] ${message}${data ? "\n  DATA: " + JSON.stringify(data, null, 2).replace(/\n/g, "\n  ") : ""}
@@ -9331,6 +9646,9 @@ async function main() {
         break;
       case "backup":
         await handleBackup(args.slice(1));
+        break;
+      case "sync":
+        await handleSync(args.slice(1));
         break;
       case "configure":
         await handleConfigure(args.slice(1));
@@ -9917,12 +10235,12 @@ async function handleSetup(setupArgs = []) {
   const db = await initDb();
   saveDb(db);
   console.log("  \u2713 Database initialized");
-  const fs7 = await import("fs");
-  const path4 = await import("path");
-  const os3 = await import("os");
+  const fs8 = await import("fs");
+  const path5 = await import("path");
+  const os4 = await import("os");
   const pluginDir = new URL(".", import.meta.url).pathname.replace("/dist/", "");
   const nodeModulesPath = `${pluginDir}/node_modules`;
-  if (!fs7.existsSync(nodeModulesPath)) {
+  if (!fs8.existsSync(nodeModulesPath)) {
     console.log("  \u23F3 Installing dependencies (first run only)...");
     const { execSync: execSync2 } = await import("child_process");
     try {
@@ -9949,8 +10267,8 @@ async function handleSetup(setupArgs = []) {
     return;
   }
   console.log("  \u23F3 Configuring statusline...");
-  const claudeDir = path4.join(os3.homedir(), ".claude");
-  const claudeSettingsPath = path4.join(claudeDir, "settings.json");
+  const claudeDir = path5.join(os4.homedir(), ".claude");
+  const claudeSettingsPath = path5.join(claudeDir, "settings.json");
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || pluginDir;
   const statuslineResult = configureClaudeStatusline(claudeSettingsPath, pluginRoot);
   if (statuslineResult.configured && statuslineResult.chained) {
@@ -10214,6 +10532,80 @@ async function handleBackup(args) {
     console.log(`  ${ANSI.dim}Rotated out ${result.rotatedOut.length} old snapshot(s)${ANSI.reset}`);
   }
 }
+async function handleSync(args) {
+  const config = loadConfig();
+  if (args.includes("--status")) {
+    const state = loadSyncState();
+    console.log(`${ANSI.brick}\u03A8${ANSI.reset} Cortex Sync`);
+    console.log(`  Scheduled: ${config.sync.enabled ? `${ANSI.green}enabled${ANSI.reset} (every ${config.sync.intervalMinutes}min)` : "disabled"}`);
+    console.log(`  Remote:    ${config.sync.remote ?? `${ANSI.yellow}not configured${ANSI.reset}`}`);
+    console.log(`  Device:    ${state.deviceId ?? `${ANSI.dim}(assigned on first sync)${ANSI.reset}`}`);
+    console.log(`  Projects:  ${config.sync.projects ? config.sync.projects.join(", ") : "all"}`);
+    if (state.lastSyncAt) {
+      console.log(`  Last:      ${state.lastSyncAt} (${state.lastResult})`);
+    } else {
+      console.log("  Last:      never");
+    }
+    const peerNames = Object.keys(state.peers);
+    if (peerNames.length > 0) {
+      console.log(`  Peers:     ${peerNames.map((p) => `${p} (seq ${state.peers[p]})`).join(", ")}`);
+    }
+    if (state.lastError) {
+      console.log(`  ${ANSI.red}Error: ${state.lastError}${ANSI.reset}`);
+    }
+    return;
+  }
+  if (!config.sync.remote) {
+    console.log(`${ANSI.yellow}\u26A0 No sync remote configured.${ANSI.reset}`);
+    console.log("  1. Install rclone and run `rclone config` to add a remote (shared by all devices)");
+    console.log('  2. Set sync.remote in ~/.cortex/config.json, e.g. "gdrive:cortex-sync"');
+    console.log("  3. Optionally set sync.enabled=true for scheduled syncs (daemon mode)");
+    console.log("  All devices must use the same embedding model.");
+    process.exitCode = 1;
+    return;
+  }
+  const options = {
+    push: !args.includes("--pull"),
+    pull: !args.includes("--push")
+  };
+  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Syncing with ${config.sync.remote}...`);
+  let result;
+  const health = await getDaemonHealth();
+  if (health) {
+    try {
+      result = await daemonFetch("/sync", {
+        method: "POST",
+        body: options,
+        timeoutMs: 30 * 60 * 1e3
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("404")) {
+        console.log(`${ANSI.red}The running daemon (v${health.version}) predates sync support. Restart it (node dist/index.js daemon-stop) and retry.${ANSI.reset}`);
+      } else {
+        console.log(`${ANSI.red}Sync via daemon failed: ${message}${ANSI.reset}`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    try {
+      const db = await initDb();
+      result = await runSync(db, options);
+      saveDb(db);
+    } catch (error) {
+      console.log(`${ANSI.red}Sync failed: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  console.log(`  ${ANSI.green}\u2713${ANSI.reset} Device ${result.deviceId} synced in ${Math.round(result.durationMs / 1e3)}s`);
+  console.log(`  Pushed: ${result.pushed.memories} memories, ${result.pushed.tombstones} deletions (${result.pushed.files} file(s))`);
+  console.log(`  Pulled: ${result.pulled.added} memories, ${result.pulled.deleted} deletions from ${result.pulled.peers.length} peer(s)`);
+  for (const err of result.pulled.errors ?? []) {
+    console.log(`  ${ANSI.yellow}\u26A0 Peer skipped this run: ${err}${ANSI.reset}`);
+  }
+}
 async function handleCheckDb() {
   console.log(`${ANSI.brick}\u03A8${ANSI.reset} Database Integrity Check`);
   console.log("================================");
@@ -10301,11 +10693,14 @@ export {
   closeDb,
   compactDatabase,
   configureClaudeStatusline,
+  deleteMemory,
+  ensureDeviceId,
   formatDuration,
   getBackupStatePath,
   getContextPercent,
   getProjectId,
   getStorageKind,
+  getSyncStatePath,
   handleCheckDb,
   handleConfigure,
   handlePostTool,
@@ -10319,12 +10714,17 @@ export {
   handleStatusline,
   hybridSearch,
   initDb,
+  insertMemory,
   isBackupDue,
+  isSyncDue,
   loadAutoSaveState,
   loadBackupState,
+  loadSyncState,
   markAutoSaved,
   readStdinWithResult,
   resetAutoSaveState,
   runBackup,
+  runSync,
+  saveDb,
   shouldAutoSave
 };

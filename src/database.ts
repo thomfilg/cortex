@@ -471,7 +471,26 @@ function createSchema(db: Storage, options: { includeFts?: boolean } = {}): void
       project_id TEXT,
       source_session TEXT NOT NULL,
       timestamp TEXT NOT NULL,
-      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      origin_device TEXT
+    )
+  `);
+
+  // Migration for databases created before sync support: NULL origin_device
+  // means "created locally" (the only truth pre-sync)
+  try {
+    db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
+  } catch {
+    // Column already exists
+  }
+
+  // Sync tombstones: deletions that must propagate to (and suppress
+  // re-import from) other devices. origin_device NULL = deleted locally.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      content_hash TEXT PRIMARY KEY,
+      deleted_at TEXT NOT NULL,
+      origin_device TEXT
     )
   `);
 
@@ -723,11 +742,41 @@ export function contentExists(db: Storage, content: string): boolean {
 }
 
 /**
- * Delete memory by ID
+ * Record a tombstone so a deletion propagates through sync and the
+ * deleted content is not re-imported from other devices.
+ */
+export function recordTombstone(db: Storage, contentHash: string, originDevice: string | null = null): void {
+  db.run(
+    `INSERT OR REPLACE INTO sync_tombstones (content_hash, deleted_at, origin_device) VALUES (?, ?, ?)`,
+    [contentHash, new Date().toISOString(), originDevice]
+  );
+}
+
+/**
+ * Delete memory by ID (tombstoned so the deletion syncs).
+ * Delete + tombstone are atomic: a crash between them would otherwise
+ * leave sync in a permanently diverged state.
  */
 export function deleteMemory(db: Storage, id: number): boolean {
-  db.run(`DELETE FROM memories WHERE id = ?`, [id]);
-  return db.getRowsModified() > 0;
+  const existing = db.exec(`SELECT content_hash FROM memories WHERE id = ?`, [id]);
+  if (existing.length === 0 || existing[0].values.length === 0) {
+    return false;
+  }
+  const hash = existing[0].values[0][0] as string;
+
+  db.run('BEGIN');
+  try {
+    db.run(`DELETE FROM memories WHERE id = ?`, [id]);
+    const deleted = db.getRowsModified() > 0;
+    if (deleted) {
+      recordTombstone(db, hash);
+    }
+    db.run('COMMIT');
+    return deleted;
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch { /* already rolled back */ }
+    throw error;
+  }
 }
 
 /**
@@ -769,12 +818,24 @@ export function updateMemory(
 ): boolean {
   const newHash = hashContent(newContent);
 
+  // For sync, an update is delete(old content) + add(new content):
+  // tombstone the old hash and mark the row as locally authored so it
+  // is pushed as a fresh addition
+  const existing = db.exec(`SELECT content_hash FROM memories WHERE id = ?`, [id]);
+  const oldHash = existing.length > 0 && existing[0].values.length > 0
+    ? (existing[0].values[0][0] as string)
+    : null;
+
   db.run(
-    `UPDATE memories SET content = ?, content_hash = ?, embedding = ? WHERE id = ?`,
+    `UPDATE memories SET content = ?, content_hash = ?, embedding = ?, origin_device = NULL WHERE id = ?`,
     [newContent, newHash, embeddingToBuffer(newEmbedding), id]
   );
 
-  return db.getRowsModified() > 0;
+  const updated = db.getRowsModified() > 0;
+  if (updated && oldHash && oldHash !== newHash) {
+    recordTombstone(db, oldHash);
+  }
+  return updated;
 }
 
 /**
@@ -843,11 +904,26 @@ export function getRecentMemories(
 }
 
 /**
- * Delete all memories for a project
+ * Delete all memories for a project (each tombstoned so the deletion
+ * syncs). Tombstones + delete are one atomic transaction.
  */
 export function deleteProjectMemories(db: Storage, projectId: string): number {
-  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
-  return db.getRowsModified();
+  const now = new Date().toISOString();
+  db.run('BEGIN');
+  try {
+    db.run(
+      `INSERT OR REPLACE INTO sync_tombstones (content_hash, deleted_at, origin_device)
+       SELECT content_hash, ?, NULL FROM memories WHERE project_id = ?`,
+      [now, projectId]
+    );
+    db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+    const deleted = db.getRowsModified();
+    db.run('COMMIT');
+    return deleted;
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch { /* already rolled back */ }
+    throw error;
+  }
 }
 
 // ============================================================================
