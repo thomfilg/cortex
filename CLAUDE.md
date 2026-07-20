@@ -203,6 +203,12 @@ Config file: `~/.cortex/config.json`
     "remote": null,
     "intervalMinutes": 1440,
     "keep": 7
+  },
+  "sync": {
+    "enabled": false,
+    "remote": null,
+    "intervalMinutes": 60,
+    "projects": null
   }
 }
 ```
@@ -231,6 +237,29 @@ With a daemon running, backups route through its `POST /backup` endpoint
 (consistent `VACUUM INTO` snapshot serialized behind other writes); without
 one, the CLI snapshots the file directly. On daemon shutdown a due backup is
 handed to a detached `backup --if-due` child. State: `~/.cortex/backup-state.json`.
+
+### Memory Sync Settings
+
+Opt-in bidirectional sync of memories between machines/team members through
+a shared rclone remote. NOT file-level DB sync (that would be
+last-writer-wins): each device appends only its own changelog files
+(`<sync.remote>/<deviceId>/<seq>.jsonl.gz`); reconciliation is set-union on
+`content_hash` plus tombstones for deletions (recorded by `cortex_delete`,
+`cortex_update`, `cortex_forget_project`). All devices must use the same
+embedding model.
+
+- `sync.enabled`: enable scheduled sync — the daemon runs the schedule (default: false)
+- `sync.remote`: shared rclone remote path, e.g. `"gdrive:cortex-sync"` (default: null)
+- `sync.intervalMinutes`: minutes between scheduled syncs (default: 60)
+- `sync.projects`: allowlist of projects to push, null = all. Pulls are unfiltered.
+
+Manual: `node dist/index.js sync` (`--push`, `--pull`, `--status`). With a
+daemon running, sync routes through its `POST /sync` endpoint (writes are
+serialized behind other writers); there is NO local fallback while a
+pre-sync daemon holds the DB — restart the daemon instead. State (device id,
+push watermarks, per-peer applied seq): `~/.cortex/sync-state.json`. Schema:
+`memories.origin_device` (NULL = authored locally, pushed; peer id =
+imported, never re-pushed) and `sync_tombstones`.
 
 ## Setup Flow
 

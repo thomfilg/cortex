@@ -26,6 +26,7 @@ import { loadConfig, getDaemonPort, getDaemonInfoPath, markAutoSaved } from './c
 import { recordSavePoint } from './analytics.js';
 import { getDaemonHealth, stopDaemon } from './daemon-client.js';
 import { runBackup, isBackupDue } from './backup.js';
+import { runSync, isSyncDue, type SyncOptions } from './sync.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
 
@@ -273,6 +274,19 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
 
+    case 'POST /sync': {
+      const body = parseBody<SyncOptions>(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      // Queued behind archives/compaction/backup: sync writes never race
+      const db = await getDb();
+      const result = await enqueue(() => runSync(db, body));
+      respondJson(res, 200, result);
+      return;
+    }
+
     case 'POST /shutdown': {
       respondJson(res, 200, { shuttingDown: true });
       setTimeout(() => shutdown(0), 50);
@@ -321,23 +335,42 @@ function removeDaemonInfo(): void {
 
 const BACKUP_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 let backupRunning = false;
+let syncRunning = false;
 
 function startBackupScheduler(): void {
   const timer = setInterval(() => {
-    // Config is re-read each tick so toggling backup.* applies live
-    if (shuttingDown || backupRunning || !isBackupDue(loadConfig().backup)) return;
-    backupRunning = true;
-    void getDb()
-      .then((db) => enqueue(() => runBackup({ db, kind: getStorageKind() })))
-      .then((result) => {
-        console.error(`[cortex-daemon] Backup uploaded: ${result.remoteName} (${Math.round(result.sizeBytes / 1024 / 1024)}MB in ${Math.round(result.durationMs / 1000)}s)`);
-      })
-      .catch((error) => {
-        console.error(`[cortex-daemon] Backup failed: ${error instanceof Error ? error.message : String(error)}`);
-      })
-      .finally(() => {
-        backupRunning = false;
-      });
+    // Config is re-read each tick so toggling backup.*/sync.* applies live
+    const config = loadConfig();
+
+    if (!shuttingDown && !backupRunning && isBackupDue(config.backup)) {
+      backupRunning = true;
+      void getDb()
+        .then((db) => enqueue(() => runBackup({ db, kind: getStorageKind() })))
+        .then((result) => {
+          console.error(`[cortex-daemon] Backup uploaded: ${result.remoteName} (${Math.round(result.sizeBytes / 1024 / 1024)}MB in ${Math.round(result.durationMs / 1000)}s)`);
+        })
+        .catch((error) => {
+          console.error(`[cortex-daemon] Backup failed: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          backupRunning = false;
+        });
+    }
+
+    if (!shuttingDown && !syncRunning && isSyncDue(config.sync)) {
+      syncRunning = true;
+      void getDb()
+        .then((db) => enqueue(() => runSync(db)))
+        .then((result) => {
+          console.error(`[cortex-daemon] Sync: pushed ${result.pushed.memories}+${result.pushed.tombstones}, pulled ${result.pulled.added}+${result.pulled.deleted} in ${Math.round(result.durationMs / 1000)}s`);
+        })
+        .catch((error) => {
+          console.error(`[cortex-daemon] Sync failed: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => {
+          syncRunning = false;
+        });
+    }
   }, BACKUP_CHECK_INTERVAL_MS);
   timer.unref();
 }
