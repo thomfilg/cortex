@@ -21,6 +21,9 @@
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0"
   },
+  "overrides": {
+    "sharp": "file:vendor/sharp-stub"
+  },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/sql.js": "^1.4.9",
