@@ -18,12 +18,14 @@
 
 import * as http from 'http';
 import * as fs from 'fs';
+import { spawn } from 'child_process';
 import { initDb, closeDb, getStats, getProjectStats, getStorageKind, compactDatabase, type CompactOptions } from './database.js';
 import { handleMcpRequest, type MCPRequest } from './tools.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
 import { loadConfig, getDaemonPort, getDaemonInfoPath, markAutoSaved } from './config.js';
 import { recordSavePoint } from './analytics.js';
 import { getDaemonHealth, stopDaemon } from './daemon-client.js';
+import { runBackup, isBackupDue } from './backup.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
 
@@ -263,6 +265,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
 
+    case 'POST /backup': {
+      // Queued behind archives/compaction: the snapshot never races a writer
+      const db = await getDb();
+      const result = await enqueue(() => runBackup({ db, kind: getStorageKind() }));
+      respondJson(res, 200, result);
+      return;
+    }
+
     case 'POST /shutdown': {
       respondJson(res, 200, { shuttingDown: true });
       setTimeout(() => shutdown(0), 50);
@@ -305,6 +315,56 @@ function removeDaemonInfo(): void {
   }
 }
 
+// ============================================================================
+// Scheduled backup
+// ============================================================================
+
+const BACKUP_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+let backupRunning = false;
+
+function startBackupScheduler(): void {
+  const timer = setInterval(() => {
+    // Config is re-read each tick so toggling backup.* applies live
+    if (shuttingDown || backupRunning || !isBackupDue(loadConfig().backup)) return;
+    backupRunning = true;
+    void getDb()
+      .then((db) => enqueue(() => runBackup({ db, kind: getStorageKind() })))
+      .then((result) => {
+        console.error(`[cortex-daemon] Backup uploaded: ${result.remoteName} (${Math.round(result.sizeBytes / 1024 / 1024)}MB in ${Math.round(result.durationMs / 1000)}s)`);
+      })
+      .catch((error) => {
+        console.error(`[cortex-daemon] Backup failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        backupRunning = false;
+      });
+  }, BACKUP_CHECK_INTERVAL_MS);
+  timer.unref();
+}
+
+/**
+ * On shutdown a due backup can't run in-process (we exit immediately), so
+ * hand it to a detached `cortex backup --if-due` that snapshots from the
+ * just-checkpointed file.
+ */
+function spawnShutdownBackup(): void {
+  try {
+    if (!isBackupDue(loadConfig().backup)) return;
+    const indexPath = decodeURIComponent(new URL('./index.js', import.meta.url).pathname);
+    if (!fs.existsSync(indexPath)) return;
+    // --direct: we are still listening on the port but our DB handle is
+    // closed - the child must snapshot from the file, not route back to us
+    const child = spawn(process.execPath, [indexPath, 'backup', '--if-due', '--direct'], {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    });
+    child.unref();
+  } catch {
+    // Best-effort; the scheduler catches up on next daemon start
+  }
+}
+
 let shuttingDown = false;
 
 function shutdown(code: number): void {
@@ -318,6 +378,8 @@ function shutdown(code: number): void {
   } catch {
     // Persisting is best-effort on shutdown
   }
+  // After closeDb: WAL is folded, the file is complete for a snapshot
+  spawnShutdownBackup();
   removeDaemonInfo();
   process.exit(code);
 }
@@ -385,6 +447,7 @@ async function main(): Promise<void> {
   server.listen(port, '127.0.0.1', () => {
     writeDaemonInfo(port);
     console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    startBackupScheduler();
     // Start loading the database in the background so first requests are fast
     void getDb().catch((error) => {
       console.error(`[cortex-daemon] Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);

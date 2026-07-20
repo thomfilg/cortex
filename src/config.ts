@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { z } from 'zod';
-import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig } from './types.js';
+import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig } from './types.js';
 
 // ============================================================================
 // Zod Schemas for Config Validation
@@ -58,6 +58,13 @@ const DaemonConfigSchema = z.object({
   storage: z.enum(['auto', 'wasm']),
 });
 
+const BackupConfigSchema = z.object({
+  enabled: z.boolean(),
+  remote: z.string().nullable(),
+  intervalMinutes: z.number().min(5).max(60 * 24 * 30),
+  keep: z.number().min(0).max(1000),
+});
+
 const ConfigSchema = z.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -66,6 +73,7 @@ const ConfigSchema = z.object({
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
+  backup: BackupConfigSchema,
 });
 
 // ============================================================================
@@ -117,6 +125,14 @@ export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
   storage: 'auto',
 };
 
+// Remote backup is opt-in: needs an rclone remote configured by the user
+export const DEFAULT_BACKUP_CONFIG: BackupConfig = {
+  enabled: false,
+  remote: null,
+  intervalMinutes: 1440, // daily
+  keep: 7,
+};
+
 export const DEFAULT_CONFIG: Config = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -125,6 +141,7 @@ export const DEFAULT_CONFIG: Config = {
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
+  backup: DEFAULT_BACKUP_CONFIG,
 };
 
 // ============================================================================

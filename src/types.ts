@@ -165,6 +165,21 @@ export interface DaemonConfig {
   storage: 'auto' | 'wasm';
 }
 
+/**
+ * Opt-in remote backup: periodic gzip snapshots of the database uploaded
+ * to an rclone remote (Google Drive, S3, Dropbox, ...). The daemon runs the
+ * schedule; `cortex backup` is the manual path. Default: disabled.
+ */
+export interface BackupConfig {
+  enabled: boolean;
+  /** rclone remote path, e.g. "gdrive:cortex-backups". null = unconfigured */
+  remote: string | null;
+  /** Minutes between scheduled backups (daemon mode) */
+  intervalMinutes: number;
+  /** Remote snapshots to keep; older ones are rotated out */
+  keep: number;
+}
+
 export interface Config {
   statusline: StatuslineConfig;
   archive: ArchiveConfig;
@@ -173,6 +188,7 @@ export interface Config {
   setup: SetupConfig;
   awareness: AwarenessConfig;
   daemon: DaemonConfig;
+  backup: BackupConfig;
 }
 
 // ============================================================================
@@ -259,7 +275,8 @@ export type CommandName =
   | 'ensure-daemon'
   | 'daemon-status'
   | 'daemon-stop'
-  | 'compact';
+  | 'compact'
+  | 'backup';
 
 // ============================================================================
 // Analytics Types
