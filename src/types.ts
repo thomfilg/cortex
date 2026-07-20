@@ -146,6 +146,17 @@ export interface AwarenessConfig {
   timezone: string | null;
 }
 
+/**
+ * Opt-in shared daemon mode.
+ * When enabled, MCP requests and hook/statusline data go through one
+ * shared HTTP daemon (single DB + embedding model) instead of each
+ * process loading its own. Default: disabled (classic per-process mode).
+ */
+export interface DaemonConfig {
+  enabled: boolean;
+  port: number;
+}
+
 export interface Config {
   statusline: StatuslineConfig;
   archive: ArchiveConfig;
@@ -153,6 +164,7 @@ export interface Config {
   restoration: RestorationConfig;
   setup: SetupConfig;
   awareness: AwarenessConfig;
+  daemon: DaemonConfig;
 }
 
 // ============================================================================
@@ -235,7 +247,10 @@ export type CommandName =
   | 'configure'
   | 'setup'
   | 'test-embed'
-  | 'check-db';
+  | 'check-db'
+  | 'ensure-daemon'
+  | 'daemon-status'
+  | 'daemon-stop';
 
 // ============================================================================
 // Analytics Types

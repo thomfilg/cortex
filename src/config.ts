@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { z } from 'zod';
-import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig } from './types.js';
+import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig } from './types.js';
 
 // ============================================================================
 // Zod Schemas for Config Validation
@@ -52,6 +52,11 @@ const AwarenessConfigSchema = z.object({
   timezone: z.string().nullable(),
 });
 
+const DaemonConfigSchema = z.object({
+  enabled: z.boolean(),
+  port: z.number().min(1024).max(65535),
+});
+
 const ConfigSchema = z.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -59,6 +64,7 @@ const ConfigSchema = z.object({
   restoration: RestorationConfigSchema,
   setup: SetupConfigSchema,
   awareness: AwarenessConfigSchema,
+  daemon: DaemonConfigSchema,
 });
 
 // ============================================================================
@@ -103,6 +109,12 @@ export const DEFAULT_AWARENESS_CONFIG: AwarenessConfig = {
   timezone: null,
 };
 
+// Daemon (shared server) mode is opt-in: classic per-process mode is default
+export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
+  enabled: false,
+  port: 4983,
+};
+
 export const DEFAULT_CONFIG: Config = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -110,6 +122,7 @@ export const DEFAULT_CONFIG: Config = {
   restoration: DEFAULT_RESTORATION_CONFIG,
   setup: DEFAULT_SETUP_CONFIG,
   awareness: DEFAULT_AWARENESS_CONFIG,
+  daemon: DEFAULT_DAEMON_CONFIG,
 };
 
 // ============================================================================
@@ -156,6 +169,31 @@ export function ensureBackupsDir(): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
+}
+
+/**
+ * Get the daemon info file path (pid/port/version of the running daemon)
+ */
+export function getDaemonInfoPath(): string {
+  return path.join(getDataDir(), 'daemon.json');
+}
+
+/**
+ * Resolve the daemon port: CORTEX_PORT env > config.daemon.port > default
+ */
+export function getDaemonPort(): number {
+  const envPort = process.env.CORTEX_PORT ? parseInt(process.env.CORTEX_PORT, 10) : NaN;
+  if (!Number.isNaN(envPort) && envPort >= 1024 && envPort <= 65535) {
+    return envPort;
+  }
+  return loadConfig().daemon.port;
+}
+
+/**
+ * Check if daemon (shared server) mode is enabled
+ */
+export function isDaemonModeEnabled(): boolean {
+  return loadConfig().daemon.enabled;
 }
 
 /**

@@ -59,7 +59,29 @@ node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure essential
 node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure minimal
 ```
 
-### 4. Finish
+### 4. Choose Server Mode
+
+Ask the user how Cortex should run:
+
+**Question:** Do you often run several Claude Code sessions at the same time?
+
+1. **Shared daemon (recommended for multiple sessions)**
+   - ONE background server holds the database + embedding model for ALL sessions.
+   - Large RAM savings (each session uses a thin ~50MB proxy instead of loading everything).
+   - The daemon starts automatically and auto-updates when the plugin updates.
+
+2. **Classic per-session (default)**
+   - Each Claude Code session loads its own copy of the database and model.
+   - Simplest option for a single session at a time.
+
+**If "1" or "Shared daemon":**
+```bash
+node ${CLAUDE_PLUGIN_ROOT}/dist/index.js configure daemon on
+```
+
+**If "2" or "Classic":** do nothing (this is the default).
+
+### 5. Finish
 
 Print the success message:
 "✅ Cortex is ready! Now restart Claude Code to enable memory tools."
