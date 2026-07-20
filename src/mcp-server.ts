@@ -18,7 +18,7 @@ import { initDb } from './database.js';
 import { loadConfig } from './config.js';
 import { handleMcpRequest, type MCPRequest, type MCPResponse } from './tools.js';
 import { ensureDaemon, forwardMcpRequest } from './daemon-client.js';
-import type { Database as SqlJsDatabase } from 'sql.js';
+import type { Storage } from './storage.js';
 
 type ServerMode = 'local' | 'proxy';
 
@@ -74,7 +74,7 @@ async function dispatchProxy(request: MCPRequest): Promise<MCPResponse> {
 async function main() {
   const mode = await resolveMode();
 
-  let db: SqlJsDatabase | null = null;
+  let db: Storage | null = null;
   if (mode === 'local') {
     db = await initDb();
   }
@@ -101,7 +101,7 @@ async function main() {
       const response =
         mode === 'proxy'
           ? await dispatchProxy(request)
-          : await handleMcpRequest(db as SqlJsDatabase, request);
+          : await handleMcpRequest(db as Storage, request);
       console.log(JSON.stringify(response));
     } catch (error) {
       const errorResponse: MCPResponse = {

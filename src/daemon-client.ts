@@ -21,10 +21,12 @@ export interface DaemonHealth {
   pid: number;
   port: number;
   uptime: number;
+  storage?: string;
 }
 
 export interface DaemonStats {
   version: string;
+  storage?: string;
   fragmentCount: number;
   projectCount: number;
   sessionCount: number;

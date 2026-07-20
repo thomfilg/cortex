@@ -6451,7 +6451,8 @@ var AwarenessConfigSchema = external_exports.object({
 });
 var DaemonConfigSchema = external_exports.object({
   enabled: external_exports.boolean(),
-  port: external_exports.number().min(1024).max(65535)
+  port: external_exports.number().min(1024).max(65535),
+  storage: external_exports.enum(["auto", "wasm"])
 });
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
@@ -6497,7 +6498,8 @@ var DEFAULT_AWARENESS_CONFIG = {
 };
 var DEFAULT_DAEMON_CONFIG = {
   enabled: false,
-  port: 4983
+  port: 4983,
+  storage: "auto"
 };
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
@@ -6635,11 +6637,69 @@ function getMostRecentSession() {
 
 // src/database.ts
 import * as path2 from "path";
+
+// src/storage.ts
+var NativeStorage = class {
+  constructor(db) {
+    this.db = db;
+  }
+  lastChanges = 0;
+  exec(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      const columns = stmt.columns().map((c) => c.name);
+      const values = stmt.raw(true).all(...params);
+      return values.length > 0 ? [{ columns, values }] : [];
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+    return [];
+  }
+  run(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      stmt.raw(true).all(...params);
+      return;
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+  }
+  getRowsModified() {
+    return this.lastChanges;
+  }
+  export() {
+    return this.db.serialize();
+  }
+  close() {
+    try {
+      this.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch {
+    }
+    this.db.close();
+  }
+};
+async function tryOpenNative(dbPath) {
+  try {
+    const mod = await import("better-sqlite3");
+    const BetterSqlite3 = mod.default ?? mod;
+    const db = new BetterSqlite3(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = NORMAL");
+    db.pragma("busy_timeout = 5000");
+    db.pragma("mmap_size = 1073741824");
+    return new NativeStorage(db);
+  } catch {
+    return null;
+  }
+}
+
+// src/database.ts
 import * as crypto2 from "crypto";
 var dbInstance = null;
 var SQL = null;
 var fts5Available = false;
 var initPromise = null;
+var storageKind = "wasm";
 var activeTempPath = null;
 function cleanupOrphanedTempFiles() {
   const dataDir = path2.dirname(getDatabasePath());
@@ -6682,7 +6742,14 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
     process.exit(128 + signals[sig]);
   });
 }
-async function initDb() {
+function hasTable(db, name) {
+  const result = db.exec(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name]
+  );
+  return result.length > 0 && result[0].values.length > 0;
+}
+async function initDb(options = {}) {
   if (dbInstance) {
     return dbInstance;
   }
@@ -6691,13 +6758,36 @@ async function initDb() {
   }
   initPromise = (async () => {
     try {
-      if (!SQL) {
-        SQL = await (0, import_sql.default)();
-      }
       ensureDataDir();
       const dbPath = getDatabasePath();
       cleanupOrphanedTempFiles();
       createBackupOnStartup();
+      if (options.preferNative && process.env.CORTEX_STORAGE !== "wasm") {
+        const native = await tryOpenNative(dbPath);
+        if (native) {
+          try {
+            createSchema(native, { includeFts: false });
+            fts5Available = hasTable(native, "memories_fts");
+            const validation = validateDatabase(native);
+            if (!validation.valid) {
+              throw new Error(`validation failed: ${validation.errors.join("; ")}`);
+            }
+            storageKind = "native";
+            dbInstance = native;
+            return native;
+          } catch (error) {
+            try {
+              native.close();
+            } catch {
+            }
+            console.error(`[cortex] Native storage unusable (${error instanceof Error ? error.message : String(error)}) - falling back to sql.js`);
+          }
+        }
+      }
+      storageKind = "wasm";
+      if (!SQL) {
+        SQL = await (0, import_sql.default)();
+      }
       if (fs2.existsSync(dbPath)) {
         let loadedDb = null;
         let needsRecovery = false;
@@ -6886,7 +6976,8 @@ function checkFts5(db) {
     return false;
   }
 }
-function createSchema(db) {
+function createSchema(db, options = {}) {
+  const { includeFts = true } = options;
   db.run(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6940,8 +7031,8 @@ function createSchema(db) {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  fts5Available = checkFts5(db);
-  if (fts5Available) {
+  fts5Available = includeFts ? checkFts5(db) : false;
+  if (includeFts && fts5Available) {
     try {
       db.run(`
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -6972,6 +7063,9 @@ function createSchema(db) {
   }
 }
 function saveDb(db) {
+  if (storageKind === "native") {
+    return;
+  }
   const data = db.export();
   const buffer = Buffer.from(data);
   const dbPath = getDatabasePath();
@@ -8630,7 +8724,7 @@ async function handleForgetProject(db, params) {
       message: `This will delete ${projectStats.fragmentCount} memories from ${projectId}. Call cortex_forget_project with confirm: true to proceed.`
     };
   }
-  const result = db.exec(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
   const deletedCount = db.getRowsModified();
   saveDb(db);
   return {

@@ -9,6 +9,7 @@ import * as os from 'os';
 import initSqlJs, { Database as SqlJsDatabase, SqlValue } from 'sql.js';
 import { getDatabasePath, ensureDataDir, getBackupsDir, ensureBackupsDir, cleanupActiveConfigTempFile } from './config.js';
 import * as path from 'path';
+import { tryOpenNative, NativeStorage, type Storage, type StorageKind } from './storage.js';
 import type { Memory, MemoryInput, DbStats, SessionTurn, TurnInput } from './types.js';
 import * as crypto from 'crypto';
 
@@ -16,10 +17,18 @@ import * as crypto from 'crypto';
 // Database Initialization
 // ============================================================================
 
-let dbInstance: SqlJsDatabase | null = null;
+let dbInstance: Storage | null = null;
 let SQL: initSqlJs.SqlJsStatic | null = null;
 let fts5Available = false;
-let initPromise: Promise<SqlJsDatabase> | null = null;
+let initPromise: Promise<Storage> | null = null;
+let storageKind: StorageKind = 'wasm';
+
+/**
+ * Which backend the current database handle uses
+ */
+export function getStorageKind(): StorageKind {
+  return storageKind;
+}
 
 // Track in-progress temp file for cleanup on process kill
 let activeTempPath: string | null = null;
@@ -78,10 +87,27 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
 }
 
 /**
- * Initialize sql.js and load or create database
- * Uses promise-based mutex to prevent concurrent initialization
+ * Check whether a table (including virtual tables) exists
  */
-export async function initDb(): Promise<SqlJsDatabase> {
+function hasTable(db: Storage, name: string): boolean {
+  const result = db.exec(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name]
+  );
+  return result.length > 0 && result[0].values.length > 0;
+}
+
+/**
+ * Initialize the database and load or create it.
+ * Uses promise-based mutex to prevent concurrent initialization.
+ *
+ * Backends:
+ * - default: sql.js (WASM, whole file in memory) - classic behavior
+ * - preferNative: better-sqlite3 (file-backed, WAL) - used by the daemon;
+ *   falls back to sql.js automatically when unavailable.
+ *   CORTEX_STORAGE=wasm forces the sql.js backend regardless.
+ */
+export async function initDb(options: { preferNative?: boolean } = {}): Promise<Storage> {
   if (dbInstance) {
     return dbInstance;
   }
@@ -93,11 +119,6 @@ export async function initDb(): Promise<SqlJsDatabase> {
 
   initPromise = (async () => {
     try {
-      // Initialize sql.js
-      if (!SQL) {
-        SQL = await initSqlJs();
-      }
-
       ensureDataDir();
       const dbPath = getDatabasePath();
 
@@ -105,7 +126,42 @@ export async function initDb(): Promise<SqlJsDatabase> {
       cleanupOrphanedTempFiles();
 
       // Create backup before loading existing database
+      // (native note: a -wal file from a crashed daemon is replayed on open;
+      // the backup copy of the main file may miss those last transactions)
       createBackupOnStartup();
+
+      // Native backend: real file-backed SQLite. Pages load on demand
+      // instead of the whole DB living in RAM, and writes are WAL
+      // transactions instead of full-file rewrites.
+      if (options.preferNative && process.env.CORTEX_STORAGE !== 'wasm') {
+        const native = await tryOpenNative(dbPath);
+        if (native) {
+          try {
+            // Never create FTS5 tables here: the file must stay writable by
+            // the sql.js backend, whose bundled build lacks FTS5 (see
+            // createSchema docs). Keyword search uses the LIKE fallback.
+            createSchema(native, { includeFts: false });
+            // If the file somehow already has an FTS index, use it natively
+            fts5Available = hasTable(native, 'memories_fts');
+            const validation = validateDatabase(native);
+            if (!validation.valid) {
+              throw new Error(`validation failed: ${validation.errors.join('; ')}`);
+            }
+            storageKind = 'native';
+            dbInstance = native;
+            return native;
+          } catch (error) {
+            try { native.close(); } catch { /* ignore */ }
+            console.error(`[cortex] Native storage unusable (${error instanceof Error ? error.message : String(error)}) - falling back to sql.js`);
+          }
+        }
+      }
+
+      // sql.js (WASM) backend - classic behavior
+      storageKind = 'wasm';
+      if (!SQL) {
+        SQL = await initSqlJs();
+      }
 
       // Load existing database or create new one
       if (fs.existsSync(dbPath)) {
@@ -270,7 +326,7 @@ export interface DatabaseValidationResult {
 /**
  * Validate database structure and integrity
  */
-export function validateDatabase(db: SqlJsDatabase): DatabaseValidationResult {
+export function validateDatabase(db: Storage): DatabaseValidationResult {
   const result: DatabaseValidationResult = {
     valid: true,
     errors: [],
@@ -383,7 +439,7 @@ function attemptRecovery(): SqlJsDatabase | null {
 /**
  * Check if FTS5 is available
  */
-function checkFts5(db: SqlJsDatabase): boolean {
+function checkFts5(db: Storage): boolean {
   try {
     db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_test USING fts5(test)`);
     db.exec(`DROP TABLE _fts5_test`);
@@ -395,8 +451,16 @@ function checkFts5(db: SqlJsDatabase): boolean {
 
 /**
  * Create database schema
+ *
+ * includeFts: the FTS5 virtual table + triggers may only be created when
+ * EVERY backend that might open this file supports FTS5. The bundled sql.js
+ * build does not, so a natively-created FTS table would break all writes on
+ * any later sql.js open (triggers reference a missing module). The native
+ * backend therefore passes includeFts: false and keyword search uses the
+ * existing LIKE fallback on both backends.
  */
-function createSchema(db: SqlJsDatabase): void {
+function createSchema(db: Storage, options: { includeFts?: boolean } = {}): void {
+  const { includeFts = true } = options;
   // Main memories table
   db.run(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -463,9 +527,9 @@ function createSchema(db: SqlJsDatabase): void {
   `);
 
   // Try to create FTS5 virtual table (may not be available in all sql.js builds)
-  fts5Available = checkFts5(db);
+  fts5Available = includeFts ? checkFts5(db) : false;
 
-  if (fts5Available) {
+  if (includeFts && fts5Available) {
     try {
       db.run(`
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -502,9 +566,13 @@ function createSchema(db: SqlJsDatabase): void {
 
 /**
  * Save database to disk using atomic write pattern
- * Uses temp-file + rename to prevent corruption on crash
+ * Uses temp-file + rename to prevent corruption on crash.
+ * No-op for the native backend: writes are already durable WAL transactions.
  */
-export function saveDb(db: SqlJsDatabase): void {
+export function saveDb(db: Storage): void {
+  if (storageKind === 'native') {
+    return;
+  }
   const data = db.export();
   const buffer = Buffer.from(data);
   const dbPath = getDatabasePath();
@@ -535,10 +603,13 @@ export function saveDb(db: SqlJsDatabase): void {
  */
 export function closeDb(): void {
   if (dbInstance) {
-    saveDb(dbInstance);
-    dbInstance.close();
+    saveDb(dbInstance); // no-op for native (WAL is already durable)
+    dbInstance.close(); // native adapter checkpoints the WAL on close
     dbInstance = null;
   }
+  // Allow a fresh open after close (initPromise caches the CLOSED handle otherwise)
+  initPromise = null;
+  storageKind = 'wasm';
 }
 
 /**
@@ -577,7 +648,7 @@ function bufferToEmbedding(buffer: Buffer): Float32Array {
  * Insert a new memory
  */
 export function insertMemory(
-  db: SqlJsDatabase,
+  db: Storage,
   memory: MemoryInput
 ): { id: number; isDuplicate: boolean } {
   const hash = hashContent(memory.content);
@@ -616,7 +687,7 @@ export function insertMemory(
 /**
  * Get memory by ID
  */
-export function getMemory(db: SqlJsDatabase, id: number): Memory | null {
+export function getMemory(db: Storage, id: number): Memory | null {
   const result = db.exec(
     `SELECT id, content, content_hash, embedding, project_id, source_session, timestamp
      FROM memories WHERE id = ?`,
@@ -642,7 +713,7 @@ export function getMemory(db: SqlJsDatabase, id: number): Memory | null {
 /**
  * Check if content already exists
  */
-export function contentExists(db: SqlJsDatabase, content: string): boolean {
+export function contentExists(db: Storage, content: string): boolean {
   const hash = hashContent(content);
   const result = db.exec(
     `SELECT 1 FROM memories WHERE content_hash = ? LIMIT 1`,
@@ -654,7 +725,7 @@ export function contentExists(db: SqlJsDatabase, content: string): boolean {
 /**
  * Delete memory by ID
  */
-export function deleteMemory(db: SqlJsDatabase, id: number): boolean {
+export function deleteMemory(db: Storage, id: number): boolean {
   db.run(`DELETE FROM memories WHERE id = ?`, [id]);
   return db.getRowsModified() > 0;
 }
@@ -664,7 +735,7 @@ export function deleteMemory(db: SqlJsDatabase, id: number): boolean {
  * Unlike insertMemory, this creates a unique session ID for manual entries
  */
 export function storeManualMemory(
-  db: SqlJsDatabase,
+  db: Storage,
   content: string,
   embedding: Float32Array,
   projectId: string | null,
@@ -691,7 +762,7 @@ export function storeManualMemory(
  * Update memory content by ID
  */
 export function updateMemory(
-  db: SqlJsDatabase,
+  db: Storage,
   id: number,
   newContent: string,
   newEmbedding: Float32Array
@@ -710,7 +781,7 @@ export function updateMemory(
  * Update memory project ID
  */
 export function updateMemoryProjectId(
-  db: SqlJsDatabase,
+  db: Storage,
   id: number,
   newProjectId: string | null
 ): boolean {
@@ -726,7 +797,7 @@ export function updateMemoryProjectId(
  * Bulk rename project - move all memories from one project to another
  */
 export function renameProject(
-  db: SqlJsDatabase,
+  db: Storage,
   oldProjectId: string,
   newProjectId: string
 ): number {
@@ -742,7 +813,7 @@ export function renameProject(
  * Get recent memories for a project, sorted by timestamp
  */
 export function getRecentMemories(
-  db: SqlJsDatabase,
+  db: Storage,
   projectId: string | null,
   limit: number = 10
 ): Array<{ id: number; content: string; timestamp: Date; projectId: string | null }> {
@@ -774,7 +845,7 @@ export function getRecentMemories(
 /**
  * Delete all memories for a project
  */
-export function deleteProjectMemories(db: SqlJsDatabase, projectId: string): number {
+export function deleteProjectMemories(db: Storage, projectId: string): number {
   db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
   return db.getRowsModified();
 }
@@ -787,7 +858,7 @@ export function deleteProjectMemories(db: SqlJsDatabase, projectId: string): num
  * Search memories by vector similarity (cosine distance)
  */
 export function searchByVector(
-  db: SqlJsDatabase,
+  db: Storage,
   queryEmbedding: Float32Array,
   projectId?: string | null,
   limit: number = 10
@@ -835,7 +906,7 @@ export function searchByVector(
  * Uses FTS5 if available, falls back to LIKE queries
  */
 export function searchByKeyword(
-  db: SqlJsDatabase,
+  db: Storage,
   query: string,
   projectId?: string | null,
   limit: number = 10
@@ -863,7 +934,7 @@ export function searchByKeyword(
  * FTS5 full-text search
  */
 function searchByFts5(
-  db: SqlJsDatabase,
+  db: Storage,
   query: string,
   projectId?: string | null,
   limit: number = 10
@@ -909,7 +980,7 @@ function searchByFts5(
  * LIKE-based keyword search (fallback when FTS5 unavailable)
  */
 function searchByLike(
-  db: SqlJsDatabase,
+  db: Storage,
   query: string,
   projectId?: string | null,
   limit: number = 10
@@ -967,7 +1038,7 @@ function searchByLike(
 /**
  * Get database statistics
  */
-export function getStats(db: SqlJsDatabase): DbStats {
+export function getStats(db: Storage): DbStats {
   const fragmentResult = db.exec(`SELECT COUNT(*) FROM memories`);
   const fragmentCount = fragmentResult[0]?.values[0]?.[0] as number ?? 0;
 
@@ -1005,7 +1076,7 @@ export function getStats(db: SqlJsDatabase): DbStats {
 /**
  * List all projects with their fragment counts
  */
-export function listProjects(db: SqlJsDatabase): Array<{ projectId: string; fragmentCount: number }> {
+export function listProjects(db: Storage): Array<{ projectId: string; fragmentCount: number }> {
   const result = db.exec(`
     SELECT project_id, COUNT(*) as count
     FROM memories
@@ -1025,7 +1096,7 @@ export function listProjects(db: SqlJsDatabase): Array<{ projectId: string; frag
 /**
  * Get stats for a specific project
  */
-export function getProjectStats(db: SqlJsDatabase, projectId: string): {
+export function getProjectStats(db: Storage, projectId: string): {
   fragmentCount: number;
   sessionCount: number;
   lastArchive: Date | null;
@@ -1063,7 +1134,7 @@ export function getProjectStats(db: SqlJsDatabase, projectId: string): {
 /**
  * Insert a session turn
  */
-export function insertTurn(db: SqlJsDatabase, turn: TurnInput): number {
+export function insertTurn(db: Storage, turn: TurnInput): number {
   db.run(
     `INSERT INTO session_turns (role, content, project_id, session_id, turn_index, timestamp)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1077,7 +1148,7 @@ export function insertTurn(db: SqlJsDatabase, turn: TurnInput): number {
  * Get recent turns for a project, ordered chronologically
  */
 export function getRecentTurns(
-  db: SqlJsDatabase,
+  db: Storage,
   projectId: string | null,
   limit: number = 6
 ): SessionTurn[] {
@@ -1115,7 +1186,7 @@ export function getRecentTurns(
 /**
  * Clear old turns, keeping only the most recent N per project
  */
-export function clearOldTurns(db: SqlJsDatabase, keepCount: number = 10): number {
+export function clearOldTurns(db: Storage, keepCount: number = 10): number {
   // Delete turns older than the most recent keepCount
   db.run(`
     DELETE FROM session_turns
@@ -1131,7 +1202,7 @@ export function clearOldTurns(db: SqlJsDatabase, keepCount: number = 10): number
 /**
  * Clear all turns for a project (called before saving new turns)
  */
-export function clearProjectTurns(db: SqlJsDatabase, projectId: string | null): number {
+export function clearProjectTurns(db: Storage, projectId: string | null): number {
   if (projectId === null) {
     db.run(`DELETE FROM session_turns WHERE project_id IS NULL`);
   } else {
@@ -1159,7 +1230,7 @@ export interface SessionSummaryInput {
 /**
  * Insert or update a session summary
  */
-export function upsertSessionSummary(db: SqlJsDatabase, input: SessionSummaryInput): number {
+export function upsertSessionSummary(db: Storage, input: SessionSummaryInput): number {
   db.run(
     `INSERT OR REPLACE INTO session_summaries
      (project_id, session_id, summary, key_decisions, key_outcomes, blockers, context_at_save, fragments_saved, timestamp)
@@ -1184,7 +1255,7 @@ export function upsertSessionSummary(db: SqlJsDatabase, input: SessionSummaryInp
  * Get recent session summaries for a project
  */
 export function getRecentSummaries(
-  db: SqlJsDatabase,
+  db: Storage,
   projectId: string | null,
   limit: number = 5
 ): Array<{
@@ -1231,7 +1302,7 @@ export function getRecentSummaries(
 /**
  * Get last processed line number for a session
  */
-export function getSessionProgress(db: SqlJsDatabase, sessionId: string): number {
+export function getSessionProgress(db: Storage, sessionId: string): number {
   try {
     const result = db.exec(
       `SELECT last_processed_line FROM session_progress WHERE session_id = ?`,
@@ -1249,7 +1320,7 @@ export function getSessionProgress(db: SqlJsDatabase, sessionId: string): number
 /**
  * Update session progress
  */
-export function updateSessionProgress(db: SqlJsDatabase, sessionId: string, lastLine: number): void {
+export function updateSessionProgress(db: Storage, sessionId: string, lastLine: number): void {
   try {
     db.run(
       `INSERT OR REPLACE INTO session_progress (session_id, last_processed_line) VALUES (?, ?)`,
@@ -1258,6 +1329,95 @@ export function updateSessionProgress(db: SqlJsDatabase, sessionId: string, last
   } catch (e) {
     console.error('Failed to update session progress:', e);
   }
+}
+
+// ============================================================================
+// Compaction / Retention
+// ============================================================================
+
+export interface CompactOptions {
+  /** Keep only the most recent N session turns (default 50) */
+  keepTurns?: number;
+  /** Delete session_progress rows not updated in N days (default 30) */
+  progressMaxAgeDays?: number;
+  /** DESTRUCTIVE: delete memories older than N days. Off unless provided. */
+  pruneMemoriesOlderThanDays?: number | null;
+}
+
+export interface CompactResult {
+  turnsDeleted: number;
+  progressDeleted: number;
+  memoriesDeleted: number;
+  sizeBefore: number;
+  sizeAfter: number;
+}
+
+/**
+ * Compact the database: prune bookkeeping tables, optionally age out old
+ * memories, then VACUUM to reclaim disk space.
+ *
+ * Memory pruning is opt-in only - restoration turns and progress rows are
+ * transient bookkeeping, but memories are the user's data.
+ */
+export function compactDatabase(db: Storage, options: CompactOptions = {}): CompactResult {
+  const {
+    keepTurns = 50,
+    progressMaxAgeDays = 30,
+    pruneMemoriesOlderThanDays = null,
+  } = options;
+
+  const dbPath = getDatabasePath();
+  const sizeBefore = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+
+  const result: CompactResult = {
+    turnsDeleted: 0,
+    progressDeleted: 0,
+    memoriesDeleted: 0,
+    sizeBefore,
+    sizeAfter: sizeBefore,
+  };
+
+  // Prune restoration turns beyond the most recent keepTurns
+  try {
+    result.turnsDeleted = clearOldTurns(db, keepTurns);
+  } catch {
+    // Table may not exist on very old databases
+  }
+
+  // Prune stale incremental-indexing progress rows
+  // (updated_at uses CURRENT_TIMESTAMP format, so compare via datetime())
+  try {
+    db.run(
+      `DELETE FROM session_progress WHERE updated_at < datetime('now', ?)`,
+      [`-${Math.max(1, Math.floor(progressMaxAgeDays))} days`]
+    );
+    result.progressDeleted = db.getRowsModified();
+  } catch {
+    // Table may not exist on very old databases
+  }
+
+  // Optional destructive pruning of old memories
+  // (memories.timestamp is an ISO string, so compare against an ISO cutoff)
+  if (pruneMemoriesOlderThanDays !== null && pruneMemoriesOlderThanDays > 0) {
+    const cutoff = new Date(Date.now() - pruneMemoriesOlderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    db.run(`DELETE FROM memories WHERE timestamp < ?`, [cutoff]);
+    result.memoriesDeleted = db.getRowsModified();
+  }
+
+  // Reclaim free pages
+  // (discriminate on the handle itself, not module state, so this function
+  // stays correct for any Storage passed in)
+  db.run('VACUUM');
+  if (db instanceof NativeStorage) {
+    // Fold the WAL so the on-disk size reflects the vacuumed database
+    db.run(`PRAGMA wal_checkpoint(TRUNCATE)`);
+  } else {
+    // sql.js: persist the vacuumed in-memory database to disk
+    saveDb(db);
+  }
+
+  result.sizeAfter = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
+  return result;
 }
 
 // ============================================================================

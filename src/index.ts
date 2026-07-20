@@ -5,10 +5,10 @@
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
 import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, type ConfigPreset } from './config.js';
-import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, type DaemonStats } from './daemon-client.js';
+import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, daemonFetch, type DaemonStats } from './daemon-client.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
-import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles } from './database.js';
+import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, formatSearchResults } from './search.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
@@ -142,6 +142,10 @@ async function main() {
 
       case 'daemon-stop':
         await handleDaemonStop();
+        break;
+
+      case 'compact':
+        await handleCompact(args.slice(1));
         break;
 
       case 'configure':
@@ -1189,6 +1193,79 @@ async function handleDaemonStop() {
   );
 }
 
+/**
+ * Compact the database: prune bookkeeping tables, optionally age out old
+ * memories (--prune-days=N, destructive, off by default), then VACUUM.
+ * Routes through the daemon when one is running so compaction never races
+ * another writer.
+ */
+async function handleCompact(args: string[]) {
+  let keepTurns = 50;
+  let pruneDays: number | null = null;
+
+  for (const arg of args) {
+    if (arg.startsWith('--keep-turns=')) {
+      keepTurns = parseInt(arg.slice('--keep-turns='.length), 10) || 50;
+    } else if (arg.startsWith('--prune-days=')) {
+      const parsed = parseInt(arg.slice('--prune-days='.length), 10);
+      pruneDays = Number.isNaN(parsed) || parsed <= 0 ? null : parsed;
+    }
+  }
+
+  console.log(`${ANSI.brick}Ψ${ANSI.reset} Compacting database${pruneDays ? ` (pruning memories older than ${pruneDays} days)` : ''}...`);
+
+  interface CompactReport {
+    turnsDeleted: number;
+    progressDeleted: number;
+    memoriesDeleted: number;
+    sizeBefore: number;
+    sizeAfter: number;
+    storage?: string;
+  }
+
+  let report: CompactReport;
+
+  const health = await getDaemonHealth();
+  if (health) {
+    // A daemon owns the database - compact through it (VACUUM on a large
+    // DB can take a while, so allow a long timeout)
+    const result = await daemonFetch('/compact', {
+      method: 'POST',
+      body: { keepTurns, pruneMemoriesOlderThanDays: pruneDays },
+      timeoutMs: 600000,
+    }).catch((error) => {
+      console.log(`${ANSI.red}Compaction via daemon failed: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
+      return null;
+    });
+    if (!result) {
+      process.exitCode = 1;
+      return;
+    }
+    report = result as CompactReport;
+  } else {
+    const config = loadConfig();
+    if (config.daemon.enabled) {
+      console.log(`${ANSI.yellow}⚠ Daemon mode is enabled but no daemon is running - compacting locally.${ANSI.reset}`);
+      console.log(`${ANSI.yellow}  Make sure no other Cortex sessions are writing while this runs.${ANSI.reset}`);
+    }
+    const db = await initDb();
+    report = { ...compactDatabase(db, { keepTurns, pruneMemoriesOlderThanDays: pruneDays }), storage: getStorageKind() };
+  }
+
+  console.log('');
+  console.log('Compaction Complete');
+  console.log('-------------------');
+  console.log(`  Turns pruned:    ${report.turnsDeleted}`);
+  console.log(`  Progress pruned: ${report.progressDeleted}`);
+  if (pruneDays) {
+    console.log(`  Memories pruned: ${report.memoriesDeleted}`);
+  }
+  console.log(`  Size:            ${formatBytes(report.sizeBefore)} -> ${formatBytes(report.sizeAfter)}`);
+  if (report.storage) {
+    console.log(`  Backend:         ${report.storage}`);
+  }
+}
+
 async function handleCheckDb() {
   console.log(`${ANSI.brick}Ψ${ANSI.reset} Database Integrity Check`);
   console.log('================================');
@@ -1307,6 +1384,8 @@ export {
   initDb,
   closeDb,
   hybridSearch,
+  compactDatabase,
+  getStorageKind,
   // Export statusline configuration for testing
   configureClaudeStatusline,
   buildCortexStatuslineCommand,

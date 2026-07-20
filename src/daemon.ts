@@ -18,30 +18,43 @@
 
 import * as http from 'http';
 import * as fs from 'fs';
-import { initDb, closeDb, getStats, getProjectStats } from './database.js';
+import { initDb, closeDb, getStats, getProjectStats, getStorageKind, compactDatabase, type CompactOptions } from './database.js';
 import { handleMcpRequest, type MCPRequest } from './tools.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
-import { getDaemonPort, getDaemonInfoPath, markAutoSaved } from './config.js';
+import { loadConfig, getDaemonPort, getDaemonInfoPath, markAutoSaved } from './config.js';
 import { recordSavePoint } from './analytics.js';
 import { getDaemonHealth, stopDaemon } from './daemon-client.js';
 import { VERSION } from './version.js';
-import type { Database as SqlJsDatabase } from 'sql.js';
+import type { Storage } from './storage.js';
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const startedAt = Date.now();
 
 // Database loads once, lazily awaited by handlers (loading a large DB can
-// take seconds; /health responds immediately so clients see us come up)
-let dbPromise: Promise<SqlJsDatabase> | null = null;
-function getDb(): Promise<SqlJsDatabase> {
+// take seconds; /health responds immediately so clients see us come up).
+// The daemon prefers the native (better-sqlite3) backend: file-backed with
+// WAL, so the DB is not held in RAM; falls back to sql.js when unavailable.
+let dbPromise: Promise<Storage> | null = null;
+let dbReady = false;
+function getDb(): Promise<Storage> {
   if (!dbPromise) {
-    dbPromise = initDb();
+    dbPromise = initDb({ preferNative: loadConfig().daemon.storage !== 'wasm' });
+    dbPromise.then(() => { dbReady = true; }).catch(() => undefined);
   }
   return dbPromise;
 }
 
-// Serialize archive operations: single writer, no concurrent full-DB exports
-let archiveChain: Promise<void> = Promise.resolve();
+// Serialize write-heavy operations: single writer, one at a time
+let writeChain: Promise<void> = Promise.resolve();
+
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(job);
+  writeChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
 
 interface ArchiveRequestBody {
   transcriptPath: string;
@@ -69,12 +82,7 @@ async function runArchive(body: ArchiveRequestBody): Promise<{ archived: number;
 }
 
 function enqueueArchive(body: ArchiveRequestBody): Promise<{ archived: number; skipped: number; duplicates: number; formatted: string }> {
-  const job = archiveChain.then(() => runArchive(body));
-  archiveChain = job.then(
-    () => undefined,
-    () => undefined
-  );
-  return job;
+  return enqueue(() => runArchive(body));
 }
 
 // ============================================================================
@@ -139,6 +147,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         pid: process.pid,
         port: getDaemonPort(),
         uptime: Math.round((Date.now() - startedAt) / 1000),
+        storage: dbReady ? getStorageKind() : 'loading',
       });
       return;
     }
@@ -174,6 +183,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const stats = getStats(db);
       const payload: Record<string, unknown> = {
         version: VERSION,
+        storage: getStorageKind(),
         fragmentCount: stats.fragmentCount,
         projectCount: stats.projectCount,
         sessionCount: stats.sessionCount,
@@ -237,6 +247,19 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
       const result = await enqueueArchive(body);
       respondJson(res, 200, result);
+      return;
+    }
+
+    case 'POST /compact': {
+      const body = parseBody<CompactOptions>(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      // Queued behind archives: compaction and writes never interleave
+      const db = await getDb();
+      const report = await enqueue(async () => compactDatabase(db, body));
+      respondJson(res, 200, { ...report, storage: getStorageKind() });
       return;
     }
 

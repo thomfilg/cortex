@@ -6552,7 +6552,8 @@ var AwarenessConfigSchema = external_exports.object({
 });
 var DaemonConfigSchema = external_exports.object({
   enabled: external_exports.boolean(),
-  port: external_exports.number().min(1024).max(65535)
+  port: external_exports.number().min(1024).max(65535),
+  storage: external_exports.enum(["auto", "wasm"])
 });
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
@@ -6598,7 +6599,8 @@ var DEFAULT_AWARENESS_CONFIG = {
 };
 var DEFAULT_DAEMON_CONFIG = {
   enabled: false,
-  port: 4983
+  port: 4983,
+  storage: "auto"
 };
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
@@ -7170,11 +7172,72 @@ var import_sql = __toESM(require_sql_wasm(), 1);
 import * as fs3 from "fs";
 import * as os2 from "os";
 import * as path2 from "path";
+
+// src/storage.ts
+var NativeStorage = class {
+  constructor(db) {
+    this.db = db;
+  }
+  lastChanges = 0;
+  exec(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      const columns = stmt.columns().map((c) => c.name);
+      const values = stmt.raw(true).all(...params);
+      return values.length > 0 ? [{ columns, values }] : [];
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+    return [];
+  }
+  run(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      stmt.raw(true).all(...params);
+      return;
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+  }
+  getRowsModified() {
+    return this.lastChanges;
+  }
+  export() {
+    return this.db.serialize();
+  }
+  close() {
+    try {
+      this.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch {
+    }
+    this.db.close();
+  }
+};
+async function tryOpenNative(dbPath) {
+  try {
+    const mod = await import("better-sqlite3");
+    const BetterSqlite3 = mod.default ?? mod;
+    const db = new BetterSqlite3(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = NORMAL");
+    db.pragma("busy_timeout = 5000");
+    db.pragma("mmap_size = 1073741824");
+    return new NativeStorage(db);
+  } catch {
+    return null;
+  }
+}
+
+// src/database.ts
 import * as crypto2 from "crypto";
 var dbInstance = null;
 var SQL = null;
 var fts5Available = false;
 var initPromise = null;
+var storageKind = "wasm";
+function getStorageKind() {
+  return storageKind;
+}
 var activeTempPath = null;
 function cleanupOrphanedTempFiles() {
   const dataDir = path2.dirname(getDatabasePath());
@@ -7217,7 +7280,14 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
     process.exit(128 + signals[sig]);
   });
 }
-async function initDb() {
+function hasTable(db, name) {
+  const result = db.exec(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name]
+  );
+  return result.length > 0 && result[0].values.length > 0;
+}
+async function initDb(options = {}) {
   if (dbInstance) {
     return dbInstance;
   }
@@ -7226,13 +7296,36 @@ async function initDb() {
   }
   initPromise = (async () => {
     try {
-      if (!SQL) {
-        SQL = await (0, import_sql.default)();
-      }
       ensureDataDir();
       const dbPath = getDatabasePath();
       cleanupOrphanedTempFiles();
       createBackupOnStartup();
+      if (options.preferNative && process.env.CORTEX_STORAGE !== "wasm") {
+        const native = await tryOpenNative(dbPath);
+        if (native) {
+          try {
+            createSchema(native, { includeFts: false });
+            fts5Available = hasTable(native, "memories_fts");
+            const validation = validateDatabase(native);
+            if (!validation.valid) {
+              throw new Error(`validation failed: ${validation.errors.join("; ")}`);
+            }
+            storageKind = "native";
+            dbInstance = native;
+            return native;
+          } catch (error) {
+            try {
+              native.close();
+            } catch {
+            }
+            console.error(`[cortex] Native storage unusable (${error instanceof Error ? error.message : String(error)}) - falling back to sql.js`);
+          }
+        }
+      }
+      storageKind = "wasm";
+      if (!SQL) {
+        SQL = await (0, import_sql.default)();
+      }
       if (fs3.existsSync(dbPath)) {
         let loadedDb = null;
         let needsRecovery = false;
@@ -7421,7 +7514,8 @@ function checkFts5(db) {
     return false;
   }
 }
-function createSchema(db) {
+function createSchema(db, options = {}) {
+  const { includeFts = true } = options;
   db.run(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7475,8 +7569,8 @@ function createSchema(db) {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  fts5Available = checkFts5(db);
-  if (fts5Available) {
+  fts5Available = includeFts ? checkFts5(db) : false;
+  if (includeFts && fts5Available) {
     try {
       db.run(`
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -7507,6 +7601,9 @@ function createSchema(db) {
   }
 }
 function saveDb(db) {
+  if (storageKind === "native") {
+    return;
+  }
   const data = db.export();
   const buffer = Buffer.from(data);
   const dbPath = getDatabasePath();
@@ -7533,6 +7630,8 @@ function closeDb() {
     dbInstance.close();
     dbInstance = null;
   }
+  initPromise = null;
+  storageKind = "wasm";
 }
 function hashContent(content) {
   return crypto2.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
@@ -7844,6 +7943,47 @@ function updateSessionProgress(db, sessionId, lastLine) {
   } catch (e) {
     console.error("Failed to update session progress:", e);
   }
+}
+function compactDatabase(db, options = {}) {
+  const {
+    keepTurns = 50,
+    progressMaxAgeDays = 30,
+    pruneMemoriesOlderThanDays = null
+  } = options;
+  const dbPath = getDatabasePath();
+  const sizeBefore = fs3.existsSync(dbPath) ? fs3.statSync(dbPath).size : 0;
+  const result = {
+    turnsDeleted: 0,
+    progressDeleted: 0,
+    memoriesDeleted: 0,
+    sizeBefore,
+    sizeAfter: sizeBefore
+  };
+  try {
+    result.turnsDeleted = clearOldTurns(db, keepTurns);
+  } catch {
+  }
+  try {
+    db.run(
+      `DELETE FROM session_progress WHERE updated_at < datetime('now', ?)`,
+      [`-${Math.max(1, Math.floor(progressMaxAgeDays))} days`]
+    );
+    result.progressDeleted = db.getRowsModified();
+  } catch {
+  }
+  if (pruneMemoriesOlderThanDays !== null && pruneMemoriesOlderThanDays > 0) {
+    const cutoff = new Date(Date.now() - pruneMemoriesOlderThanDays * 24 * 60 * 60 * 1e3).toISOString();
+    db.run(`DELETE FROM memories WHERE timestamp < ?`, [cutoff]);
+    result.memoriesDeleted = db.getRowsModified();
+  }
+  db.run("VACUUM");
+  if (db instanceof NativeStorage) {
+    db.run(`PRAGMA wal_checkpoint(TRUNCATE)`);
+  } else {
+    saveDb(db);
+  }
+  result.sizeAfter = fs3.existsSync(dbPath) ? fs3.statSync(dbPath).size : 0;
+  return result;
 }
 function cosineSimilarity(a, b) {
   if (a.length !== b.length) {
@@ -8989,6 +9129,9 @@ async function main() {
       case "daemon-stop":
         await handleDaemonStop();
         break;
+      case "compact":
+        await handleCompact(args.slice(1));
+        break;
       case "configure":
         await handleConfigure(args.slice(1));
         break;
@@ -9757,6 +9900,56 @@ async function handleDaemonStop() {
     requested ? `${ANSI.brick}\u03A8${ANSI.reset} Daemon stop requested` : `${ANSI.brick}\u03A8${ANSI.reset} Daemon not running`
   );
 }
+async function handleCompact(args) {
+  let keepTurns = 50;
+  let pruneDays = null;
+  for (const arg of args) {
+    if (arg.startsWith("--keep-turns=")) {
+      keepTurns = parseInt(arg.slice("--keep-turns=".length), 10) || 50;
+    } else if (arg.startsWith("--prune-days=")) {
+      const parsed = parseInt(arg.slice("--prune-days=".length), 10);
+      pruneDays = Number.isNaN(parsed) || parsed <= 0 ? null : parsed;
+    }
+  }
+  console.log(`${ANSI.brick}\u03A8${ANSI.reset} Compacting database${pruneDays ? ` (pruning memories older than ${pruneDays} days)` : ""}...`);
+  let report;
+  const health = await getDaemonHealth();
+  if (health) {
+    const result = await daemonFetch("/compact", {
+      method: "POST",
+      body: { keepTurns, pruneMemoriesOlderThanDays: pruneDays },
+      timeoutMs: 6e5
+    }).catch((error) => {
+      console.log(`${ANSI.red}Compaction via daemon failed: ${error instanceof Error ? error.message : String(error)}${ANSI.reset}`);
+      return null;
+    });
+    if (!result) {
+      process.exitCode = 1;
+      return;
+    }
+    report = result;
+  } else {
+    const config = loadConfig();
+    if (config.daemon.enabled) {
+      console.log(`${ANSI.yellow}\u26A0 Daemon mode is enabled but no daemon is running - compacting locally.${ANSI.reset}`);
+      console.log(`${ANSI.yellow}  Make sure no other Cortex sessions are writing while this runs.${ANSI.reset}`);
+    }
+    const db = await initDb();
+    report = { ...compactDatabase(db, { keepTurns, pruneMemoriesOlderThanDays: pruneDays }), storage: getStorageKind() };
+  }
+  console.log("");
+  console.log("Compaction Complete");
+  console.log("-------------------");
+  console.log(`  Turns pruned:    ${report.turnsDeleted}`);
+  console.log(`  Progress pruned: ${report.progressDeleted}`);
+  if (pruneDays) {
+    console.log(`  Memories pruned: ${report.memoriesDeleted}`);
+  }
+  console.log(`  Size:            ${formatBytes(report.sizeBefore)} -> ${formatBytes(report.sizeAfter)}`);
+  if (report.storage) {
+    console.log(`  Backend:         ${report.storage}`);
+  }
+}
 async function handleCheckDb() {
   console.log(`${ANSI.brick}\u03A8${ANSI.reset} Database Integrity Check`);
   console.log("================================");
@@ -9842,10 +10035,12 @@ export {
   archiveSession,
   buildCortexStatuslineCommand,
   closeDb,
+  compactDatabase,
   configureClaudeStatusline,
   formatDuration,
   getContextPercent,
   getProjectId,
+  getStorageKind,
   handleCheckDb,
   handleConfigure,
   handlePostTool,
