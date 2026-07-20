@@ -6452,7 +6452,8 @@ var AwarenessConfigSchema = external_exports.object({
 });
 var DaemonConfigSchema = external_exports.object({
   enabled: external_exports.boolean(),
-  port: external_exports.number().min(1024).max(65535)
+  port: external_exports.number().min(1024).max(65535),
+  storage: external_exports.enum(["auto", "wasm"])
 });
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
@@ -6498,7 +6499,8 @@ var DEFAULT_AWARENESS_CONFIG = {
 };
 var DEFAULT_DAEMON_CONFIG = {
   enabled: false,
-  port: 4983
+  port: 4983,
+  storage: "auto"
 };
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
@@ -6696,11 +6698,72 @@ function markAutoSaved(transcriptPath, contextPercent, fragments) {
 
 // src/database.ts
 import * as path2 from "path";
+
+// src/storage.ts
+var NativeStorage = class {
+  constructor(db) {
+    this.db = db;
+  }
+  lastChanges = 0;
+  exec(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      const columns = stmt.columns().map((c) => c.name);
+      const values = stmt.raw(true).all(...params);
+      return values.length > 0 ? [{ columns, values }] : [];
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+    return [];
+  }
+  run(sql, params = []) {
+    const stmt = this.db.prepare(sql);
+    if (stmt.reader) {
+      stmt.raw(true).all(...params);
+      return;
+    }
+    const info = stmt.run(...params);
+    this.lastChanges = info.changes;
+  }
+  getRowsModified() {
+    return this.lastChanges;
+  }
+  export() {
+    return this.db.serialize();
+  }
+  close() {
+    try {
+      this.db.pragma("wal_checkpoint(TRUNCATE)");
+    } catch {
+    }
+    this.db.close();
+  }
+};
+async function tryOpenNative(dbPath) {
+  try {
+    const mod = await import("better-sqlite3");
+    const BetterSqlite3 = mod.default ?? mod;
+    const db = new BetterSqlite3(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.pragma("synchronous = NORMAL");
+    db.pragma("busy_timeout = 5000");
+    db.pragma("mmap_size = 1073741824");
+    return new NativeStorage(db);
+  } catch {
+    return null;
+  }
+}
+
+// src/database.ts
 import * as crypto2 from "crypto";
 var dbInstance = null;
 var SQL = null;
 var fts5Available = false;
 var initPromise = null;
+var storageKind = "wasm";
+function getStorageKind() {
+  return storageKind;
+}
 var activeTempPath = null;
 function cleanupOrphanedTempFiles() {
   const dataDir = path2.dirname(getDatabasePath());
@@ -6743,7 +6806,14 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
     process.exit(128 + signals[sig]);
   });
 }
-async function initDb() {
+function hasTable(db, name) {
+  const result = db.exec(
+    `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    [name]
+  );
+  return result.length > 0 && result[0].values.length > 0;
+}
+async function initDb(options = {}) {
   if (dbInstance) {
     return dbInstance;
   }
@@ -6752,13 +6822,36 @@ async function initDb() {
   }
   initPromise = (async () => {
     try {
-      if (!SQL) {
-        SQL = await (0, import_sql.default)();
-      }
       ensureDataDir();
       const dbPath = getDatabasePath();
       cleanupOrphanedTempFiles();
       createBackupOnStartup();
+      if (options.preferNative && process.env.CORTEX_STORAGE !== "wasm") {
+        const native = await tryOpenNative(dbPath);
+        if (native) {
+          try {
+            createSchema(native, { includeFts: false });
+            fts5Available = hasTable(native, "memories_fts");
+            const validation = validateDatabase(native);
+            if (!validation.valid) {
+              throw new Error(`validation failed: ${validation.errors.join("; ")}`);
+            }
+            storageKind = "native";
+            dbInstance = native;
+            return native;
+          } catch (error) {
+            try {
+              native.close();
+            } catch {
+            }
+            console.error(`[cortex] Native storage unusable (${error instanceof Error ? error.message : String(error)}) - falling back to sql.js`);
+          }
+        }
+      }
+      storageKind = "wasm";
+      if (!SQL) {
+        SQL = await (0, import_sql.default)();
+      }
       if (fs2.existsSync(dbPath)) {
         let loadedDb = null;
         let needsRecovery = false;
@@ -6947,7 +7040,8 @@ function checkFts5(db) {
     return false;
   }
 }
-function createSchema(db) {
+function createSchema(db, options = {}) {
+  const { includeFts = true } = options;
   db.run(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7001,8 +7095,8 @@ function createSchema(db) {
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  fts5Available = checkFts5(db);
-  if (fts5Available) {
+  fts5Available = includeFts ? checkFts5(db) : false;
+  if (includeFts && fts5Available) {
     try {
       db.run(`
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -7033,6 +7127,9 @@ function createSchema(db) {
   }
 }
 function saveDb(db) {
+  if (storageKind === "native") {
+    return;
+  }
   const data = db.export();
   const buffer = Buffer.from(data);
   const dbPath = getDatabasePath();
@@ -7059,6 +7156,8 @@ function closeDb() {
     dbInstance.close();
     dbInstance = null;
   }
+  initPromise = null;
+  storageKind = "wasm";
 }
 function hashContent(content) {
   return crypto2.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
@@ -7444,6 +7543,47 @@ function updateSessionProgress(db, sessionId, lastLine) {
   } catch (e) {
     console.error("Failed to update session progress:", e);
   }
+}
+function compactDatabase(db, options = {}) {
+  const {
+    keepTurns = 50,
+    progressMaxAgeDays = 30,
+    pruneMemoriesOlderThanDays = null
+  } = options;
+  const dbPath = getDatabasePath();
+  const sizeBefore = fs2.existsSync(dbPath) ? fs2.statSync(dbPath).size : 0;
+  const result = {
+    turnsDeleted: 0,
+    progressDeleted: 0,
+    memoriesDeleted: 0,
+    sizeBefore,
+    sizeAfter: sizeBefore
+  };
+  try {
+    result.turnsDeleted = clearOldTurns(db, keepTurns);
+  } catch {
+  }
+  try {
+    db.run(
+      `DELETE FROM session_progress WHERE updated_at < datetime('now', ?)`,
+      [`-${Math.max(1, Math.floor(progressMaxAgeDays))} days`]
+    );
+    result.progressDeleted = db.getRowsModified();
+  } catch {
+  }
+  if (pruneMemoriesOlderThanDays !== null && pruneMemoriesOlderThanDays > 0) {
+    const cutoff = new Date(Date.now() - pruneMemoriesOlderThanDays * 24 * 60 * 60 * 1e3).toISOString();
+    db.run(`DELETE FROM memories WHERE timestamp < ?`, [cutoff]);
+    result.memoriesDeleted = db.getRowsModified();
+  }
+  db.run("VACUUM");
+  if (db instanceof NativeStorage) {
+    db.run(`PRAGMA wal_checkpoint(TRUNCATE)`);
+  } else {
+    saveDb(db);
+  }
+  result.sizeAfter = fs2.existsSync(dbPath) ? fs2.statSync(dbPath).size : 0;
+  return result;
 }
 function cosineSimilarity(a, b) {
   if (a.length !== b.length) {
@@ -8881,7 +9021,7 @@ async function handleForgetProject(db, params) {
       message: `This will delete ${projectStats.fragmentCount} memories from ${projectId}. Call cortex_forget_project with confirm: true to proceed.`
     };
   }
-  const result = db.exec(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
   const deletedCount = db.getRowsModified();
   saveDb(db);
   return {
@@ -9100,13 +9240,25 @@ async function stopDaemon() {
 var MAX_BODY_BYTES = 10 * 1024 * 1024;
 var startedAt = Date.now();
 var dbPromise = null;
+var dbReady = false;
 function getDb() {
   if (!dbPromise) {
-    dbPromise = initDb();
+    dbPromise = initDb({ preferNative: loadConfig().daemon.storage !== "wasm" });
+    dbPromise.then(() => {
+      dbReady = true;
+    }).catch(() => void 0);
   }
   return dbPromise;
 }
-var archiveChain = Promise.resolve();
+var writeChain = Promise.resolve();
+function enqueue(job) {
+  const run = writeChain.then(job);
+  writeChain = run.then(
+    () => void 0,
+    () => void 0
+  );
+  return run;
+}
 async function runArchive(body) {
   const db = await getDb();
   const projectId = body.projectId ?? null;
@@ -9120,12 +9272,7 @@ async function runArchive(body) {
   return { ...result, formatted: formatArchiveResult(result) };
 }
 function enqueueArchive(body) {
-  const job = archiveChain.then(() => runArchive(body));
-  archiveChain = job.then(
-    () => void 0,
-    () => void 0
-  );
-  return job;
+  return enqueue(() => runArchive(body));
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -9178,7 +9325,8 @@ async function handleRequest(req, res) {
         version: VERSION,
         pid: process.pid,
         port: getDaemonPort(),
-        uptime: Math.round((Date.now() - startedAt) / 1e3)
+        uptime: Math.round((Date.now() - startedAt) / 1e3),
+        storage: dbReady ? getStorageKind() : "loading"
       });
       return;
     }
@@ -9209,6 +9357,7 @@ async function handleRequest(req, res) {
       const stats = getStats(db);
       const payload = {
         version: VERSION,
+        storage: getStorageKind(),
         fragmentCount: stats.fragmentCount,
         projectCount: stats.projectCount,
         sessionCount: stats.sessionCount,
@@ -9260,6 +9409,17 @@ async function handleRequest(req, res) {
       }
       const result = await enqueueArchive(body);
       respondJson(res, 200, result);
+      return;
+    }
+    case "POST /compact": {
+      const body = parseBody(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: "Invalid JSON body" });
+        return;
+      }
+      const db = await getDb();
+      const report = await enqueue(async () => compactDatabase(db, body));
+      respondJson(res, 200, { ...report, storage: getStorageKind() });
       return;
     }
     case "POST /shutdown": {

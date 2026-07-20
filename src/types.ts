@@ -155,6 +155,14 @@ export interface AwarenessConfig {
 export interface DaemonConfig {
   enabled: boolean;
   port: number;
+  /**
+   * Storage backend for the daemon:
+   * - 'auto' (default): use native better-sqlite3 when available
+   *   (file-backed, WAL - the DB no longer lives in RAM), else sql.js
+   * - 'wasm': force the classic sql.js backend
+   * Classic (non-daemon) mode always uses sql.js regardless.
+   */
+  storage: 'auto' | 'wasm';
 }
 
 export interface Config {
@@ -250,7 +258,8 @@ export type CommandName =
   | 'check-db'
   | 'ensure-daemon'
   | 'daemon-status'
-  | 'daemon-stop';
+  | 'daemon-stop'
+  | 'compact';
 
 // ============================================================================
 // Analytics Types

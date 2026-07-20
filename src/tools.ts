@@ -11,7 +11,7 @@ import { archiveSession } from './archive.js';
 import { embedQuery } from './embeddings.js';
 import { getAnalytics, getAnalyticsSummary, recordRemember, recordRecall } from './analytics.js';
 import { VERSION } from './version.js';
-import type { Database as SqlJsDatabase } from 'sql.js';
+import type { Storage } from './storage.js';
 
 // ============================================================================
 // MCP Protocol Types
@@ -266,7 +266,7 @@ export const TOOLS: Tool[] = [
 // ============================================================================
 
 async function handleRecall(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { query: string; limit?: number; includeAllProjects?: boolean; projectId?: string }
 ): Promise<unknown> {
   const { query, limit = 5, includeAllProjects = false, projectId } = params;
@@ -296,7 +296,7 @@ async function handleRecall(
 }
 
 async function handleRemember(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { content: string; context?: string; projectId?: string }
 ): Promise<unknown> {
   const { content, context, projectId } = params;
@@ -339,7 +339,7 @@ async function handleRemember(
 }
 
 async function handleSave(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { transcriptPath?: string; projectId?: string; global?: boolean }
 ): Promise<unknown> {
   let { transcriptPath, projectId } = params;
@@ -388,7 +388,7 @@ async function handleSave(
 }
 
 async function handleStats(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { projectId?: string }
 ): Promise<unknown> {
   const stats = getStats(db);
@@ -419,7 +419,7 @@ async function handleStats(
 }
 
 async function handleRestore(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { projectId?: string; messageCount?: number }
 ): Promise<unknown> {
   const { projectId, messageCount = 5 } = params;
@@ -458,7 +458,7 @@ async function handleRestore(
 }
 
 async function handleDelete(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { memoryId: number; confirm?: boolean }
 ): Promise<unknown> {
   const { memoryId, confirm = false } = params;
@@ -500,7 +500,7 @@ async function handleDelete(
 }
 
 async function handleUpdate(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { memoryId: number; content?: string; projectId?: string }
 ): Promise<unknown> {
   const { memoryId, content, projectId } = params;
@@ -556,7 +556,7 @@ async function handleUpdate(
 }
 
 async function handleRenameProject(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { oldProjectId: string; newProjectId: string }
 ): Promise<unknown> {
   const { oldProjectId, newProjectId } = params;
@@ -597,7 +597,7 @@ async function handleRenameProject(
 }
 
 async function handleForgetProject(
-  db: SqlJsDatabase,
+  db: Storage,
   params: { projectId: string; confirm?: boolean }
 ): Promise<unknown> {
   const { projectId, confirm = false } = params;
@@ -623,8 +623,7 @@ async function handleForgetProject(
     };
   }
 
-  // Import the sql.js database to run delete
-  const result = db.exec(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
+  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
   const deletedCount = db.getRowsModified();
   saveDb(db);
 
@@ -720,7 +719,7 @@ function makeInitializeResult(): unknown {
 }
 
 async function callTool(
-  db: SqlJsDatabase,
+  db: Storage,
   name: string,
   args: Record<string, unknown>
 ): Promise<unknown | null> {
@@ -766,7 +765,7 @@ async function callTool(
  * Handle a single MCP JSON-RPC request against a database.
  * Transport-agnostic: used by both the stdio server and the HTTP daemon.
  */
-export async function handleMcpRequest(db: SqlJsDatabase, request: MCPRequest): Promise<MCPResponse> {
+export async function handleMcpRequest(db: Storage, request: MCPRequest): Promise<MCPResponse> {
   const { id, method, params } = request;
 
   try {

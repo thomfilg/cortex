@@ -55,6 +55,7 @@ const AwarenessConfigSchema = z.object({
 const DaemonConfigSchema = z.object({
   enabled: z.boolean(),
   port: z.number().min(1024).max(65535),
+  storage: z.enum(['auto', 'wasm']),
 });
 
 const ConfigSchema = z.object({
@@ -113,6 +114,7 @@ export const DEFAULT_AWARENESS_CONFIG: AwarenessConfig = {
 export const DEFAULT_DAEMON_CONFIG: DaemonConfig = {
   enabled: false,
   port: 4983,
+  storage: 'auto',
 };
 
 export const DEFAULT_CONFIG: Config = {
