@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Stub out the `sharp` native dependency (fixes hooks crashing after plugin
+  install).** `@xenova/transformers` imports `sharp` unconditionally for its
+  image pipelines, but cortex only ever uses text embeddings. The real `sharp`
+  needs a native libvips binding whose install script plugin installs often
+  skip (`--ignore-scripts`), leaving every cortex hook/command crashing with
+  `Cannot find module '../build/Release/sharp-linux-x64.node'`. An npm
+  `overrides` entry now replaces `sharp` with a bundled no-op stub
+  (`vendor/sharp-stub`) that satisfies the import with no native build. Text
+  embeddings are unaffected; anything that would actually process an image
+  throws a clear "not supported" error instead.
+
 ## 2.4.0
 
 ### Features
