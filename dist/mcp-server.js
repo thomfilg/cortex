@@ -8255,7 +8255,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.1.4" ? "2.1.4" : "0.0.0-dev";
+var VERSION = "2.2.0" ? "2.2.0" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [

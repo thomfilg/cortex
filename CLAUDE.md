@@ -242,7 +242,8 @@ Analytics are stored at `~/.cortex/analytics.json` and track:
    - `package.json`
    - `.claude-plugin/plugin.json`
    - `.claude-plugin/marketplace.json`
-   - `src/mcp-server.ts` (`serverInfo.version` in `handleInitialize`)
+   - (`serverInfo.version` is injected from package.json at build time via
+     `--define:__CORTEX_VERSION__` — no source edit needed since v2.2.0)
 2. **Verify no stale versions** — `grep -r "OLD_VERSION" package.json .claude-plugin/ src/`
 3. **Update CHANGELOG.md** — add entry at top
 4. **Build** — `npm run build` (rebuilds dist/ with new version)

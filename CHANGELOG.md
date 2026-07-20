@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.2.0
+
+### Features
+
+- **Opt-in shared daemon mode.** One local HTTP server (127.0.0.1, default port
+  4983) holds the database and embedding model for ALL Claude Code sessions,
+  instead of every session loading its own copy. When `daemon.enabled` is true,
+  the stdio MCP server becomes a thin proxy and hooks/statusline become thin
+  HTTP clients. Classic per-session mode remains the default and is unchanged.
+  Enable with `configure daemon on` (or during `/cortex-setup`). Measured on a
+  690MB database: 8 sessions went from ~6.2GB resident to a single shared daemon.
+- **Optional native storage backend (daemon only).** The daemon prefers
+  better-sqlite3 (real file-backed SQLite with WAL journaling): the database is
+  read page-on-demand through the OS cache instead of living in process memory,
+  and each write is a small transaction instead of a full-file rewrite. Falls
+  back to sql.js automatically when better-sqlite3 is unavailable
+  (`optionalDependencies`; run `npm rebuild better-sqlite3` in the plugin
+  directory if the native build was skipped). Same database file format - no
+  migration. Measured: daemon anonymous RSS dropped from ~780MB to ~20MB.
+- **Daemon auto-update.** Clients compare their build version against the
+  daemon's `/health` version and replace an outdated daemon automatically after
+  a plugin update.
+- **Database compaction.** New `compact` command (and daemon `POST /compact`)
+  prunes restoration bookkeeping and VACUUMs. Memories are NEVER deleted unless
+  `--prune-days=N` is passed explicitly.
+- **New commands:** `configure daemon on|off|status`, `ensure-daemon`,
+  `daemon-status`, `daemon-stop`, `compact`, `setup --daemon`.
+
+### Bug Fixes
+
+- Fix `closeDb()` leaving a cached closed handle: reopening the database after
+  close now returns a fresh connection.
+- Single-writer daemon eliminates the multi-session lost-update hazard on
+  concurrent saves; archive operations are serialized in a queue.
+- Statusline/hook processes no longer load, back up, and rewrite the entire
+  database on every render in daemon mode.
+- Version is now injected from package.json at build time (removes the stale
+  `serverInfo.version` release-checklist step).
+
 ## 2.1.4
 
 ### Bug Fixes

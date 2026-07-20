@@ -7029,7 +7029,7 @@ import { spawn } from "child_process";
 import * as fs2 from "fs";
 
 // src/version.ts
-var VERSION = "2.1.4" ? "2.1.4" : "0.0.0-dev";
+var VERSION = "2.2.0" ? "2.2.0" : "0.0.0-dev";
 
 // src/daemon-client.ts
 function getDaemonBaseUrl() {
