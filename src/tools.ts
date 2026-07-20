@@ -4,7 +4,7 @@
  * Shared by the stdio server (mcp-server.ts) and the HTTP daemon (daemon.ts).
  */
 
-import { getStats, getProjectStats, getMemory, deleteMemory, storeManualMemory, saveDb, searchByVector, updateMemory, updateMemoryProjectId, renameProject, listProjects } from './database.js';
+import { getStats, getProjectStats, getMemory, deleteMemory, deleteProjectMemories, storeManualMemory, saveDb, searchByVector, updateMemory, updateMemoryProjectId, renameProject, listProjects } from './database.js';
 import { loadConfig, getDataDir, getCurrentSession, getMostRecentSession } from './config.js';
 import { hybridSearch } from './search.js';
 import { archiveSession } from './archive.js';
@@ -623,8 +623,8 @@ async function handleForgetProject(
     };
   }
 
-  db.run(`DELETE FROM memories WHERE project_id = ?`, [projectId]);
-  const deletedCount = db.getRowsModified();
+  // Tombstoned per fragment so the deletion propagates through sync
+  const deletedCount = deleteProjectMemories(db, projectId);
   saveDb(db);
 
   return {
