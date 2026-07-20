@@ -3,5 +3,12 @@
   "version": "0.32.6",
   "description": "No-op stand-in for sharp. Cortex only uses text embeddings; @xenova/transformers imports sharp unconditionally for its image pipelines, and the real sharp requires a native libvips binding that plugin installs often skip (--ignore-scripts), crashing every cortex hook. This stub satisfies the import without any native build.",
   "main": "index.cjs",
+  "exports": {
+    ".": {
+      "require": "./index.cjs",
+      "import": "./index.cjs",
+      "default": "./index.cjs"
+    }
+  },
   "license": "MIT"
 }
