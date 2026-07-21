@@ -5,12 +5,13 @@
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
 import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, type ConfigPreset } from './config.js';
-import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, daemonFetch, type DaemonStats } from './daemon-client.js';
+import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, type DaemonStats } from './daemon-client.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
 import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
-import { hybridSearch, formatSearchResults } from './search.js';
+import { hybridSearch, vectorSearch, formatSearchResults } from './search.js';
+import { isPromptEligible, selectForInjection, formatInjection, loadRecallState, getInjectedIds, recordInjection, getRecallStatePath } from './recall-auto.js';
 import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
 import { startSession, recordSavePoint } from './analytics.js';
 import { runBackup, isBackupDue, loadBackupState, getBackupStatePath, type BackupResult } from './backup.js';
@@ -156,6 +157,10 @@ async function main() {
 
       case 'sync':
         await handleSync(args.slice(1));
+        break;
+
+      case 'auto-recall':
+        await handleAutoRecall();
         break;
 
       case 'configure':
@@ -926,6 +931,71 @@ async function handleRecall(args: string[]) {
   console.log(formatSearchResults(results));
 }
 
+/**
+ * UserPromptSubmit hook: inject memories relevant to the user's prompt.
+ * Anything printed to stdout is appended to the conversation context, so
+ * this handler prints EITHER a well-formed injection block or nothing.
+ * All failures are silent (stderr only) - a memory feature must never
+ * break prompt submission.
+ */
+async function handleAutoRecall() {
+  const stdin = await readStdin();
+  const config = loadConfig();
+
+  if (!config.recall.auto) return;
+
+  const prompt = stdin?.prompt ?? '';
+  if (!isPromptEligible(prompt, config.recall)) return;
+
+  const sessionId = stdin?.session_id ?? 'unknown-session';
+  const projectId = stdin?.cwd ? getProjectId(stdin.cwd) : null;
+
+  const state = loadRecallState();
+  const alreadyInjected = getInjectedIds(state, sessionId);
+
+  // Fetch more than maxResults so threshold + dedup still leave choices
+  const fetchLimit = config.recall.maxResults * 3;
+
+  // Daemon-first: the daemon holds the model, so search is a cheap HTTP
+  // round-trip. Fallback loads the embedding model in-process (slower;
+  // daemon mode is recommended when auto-recall is on).
+  let results = await requestDaemonRecall({
+    query: prompt,
+    projectId,
+    limit: fetchLimit,
+    minScore: config.recall.minScore,
+  });
+
+  if (results === null) {
+    // In daemon mode, never open the DB locally as a fallback: the daemon
+    // may hold it in native/WAL form, which sql.js would read stale (and
+    // its close-time write-back could lose WAL contents). Skip instead.
+    if (config.daemon.enabled) {
+      debugLog('handleAutoRecall', 'Daemon unreachable or missing /recall; skipping (daemon mode)');
+      return;
+    }
+    try {
+      const db = await initDb();
+      results = await vectorSearch(db, prompt, {
+        projectScope: projectId !== null,
+        projectId: projectId ?? undefined,
+        limit: fetchLimit,
+      });
+    } catch (error) {
+      debugLog('handleAutoRecall', 'Local search failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+  }
+
+  const selected = selectForInjection(results, config.recall, alreadyInjected);
+  if (selected.length === 0) return;
+
+  console.log(formatInjection(selected, projectId));
+  recordInjection(state, sessionId, selected.map((r) => r.id));
+}
+
 async function handleStats() {
   const stdin = await readStdin();
   const db = await initDb();
@@ -1116,6 +1186,31 @@ async function handleConfigure(args: string[]) {
     return;
   }
 
+  if (args[0] === 'recall') {
+    const action = args[1];
+    const current = loadConfig();
+
+    if (action === 'on' || action === 'enable') {
+      updateConfig({ recall: { ...current.recall, auto: true } });
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} Auto-recall ${ANSI.green}enabled${ANSI.reset}`);
+      console.log(`  Relevant memories (similarity >= ${current.recall.minScore}) are injected on each prompt.`);
+      if (!current.daemon.enabled) {
+        console.log(`  ${ANSI.yellow}Tip:${ANSI.reset} enable daemon mode (configure daemon on) - without it each prompt loads the embedding model.`);
+      }
+      console.log('  Restart Claude Code sessions to activate the hook.');
+    } else if (action === 'off' || action === 'disable') {
+      updateConfig({ recall: { ...current.recall, auto: false } });
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} Auto-recall ${ANSI.yellow}disabled${ANSI.reset}`);
+    } else {
+      console.log(`Auto-recall:  ${current.recall.auto ? 'enabled' : 'disabled'}`);
+      console.log(`  minScore:        ${current.recall.minScore} (cosine similarity threshold)`);
+      console.log(`  maxResults:      ${current.recall.maxResults}`);
+      console.log(`  tokenBudget:     ${current.recall.tokenBudget}`);
+      console.log(`  minPromptLength: ${current.recall.minPromptLength}`);
+    }
+    return;
+  }
+
   const preset = args[0] as ConfigPreset | undefined;
 
   if (preset && ['full', 'essential', 'minimal'].includes(preset)) {
@@ -1141,6 +1236,11 @@ async function handleConfigure(args: string[]) {
   console.log('  daemon on     - Share ONE database + embedding model across all sessions');
   console.log('  daemon off    - Classic per-process mode (default)');
   console.log('  daemon status - Show daemon mode config and process state');
+  console.log('');
+  console.log('Auto-recall:');
+  console.log('  recall on     - Inject relevant memories on each prompt (UserPromptSubmit)');
+  console.log('  recall off    - Disable auto-recall (default)');
+  console.log('  recall status - Show auto-recall config');
 }
 
 async function handleTestEmbed(text: string) {
@@ -1591,7 +1691,18 @@ export {
   ensureDeviceId,
   insertMemory,
   deleteMemory,
-  saveDb
+  saveDb,
+  // Export auto-recall helpers for testing
+  isPromptEligible,
+  selectForInjection,
+  formatInjection,
+  loadRecallState,
+  getInjectedIds,
+  recordInjection,
+  getRecallStatePath,
+  vectorSearch,
+  embedQuery,
+  loadConfig
 };
 
 // Run main only when executed directly (not when imported)

@@ -254,6 +254,28 @@ export async function requestDaemonArchive(params: {
 }
 
 /**
+ * Vector-search the daemon for auto-recall, or null if unreachable.
+ * Timestamps come back as ISO strings and are revived to Dates here.
+ */
+export async function requestDaemonRecall(params: {
+  query: string;
+  projectId: string | null;
+  limit?: number;
+  minScore?: number;
+  timeoutMs?: number;
+}): Promise<Array<{ id: number; score: number; content: string; timestamp: Date; projectId: string | null }> | null> {
+  const { timeoutMs = 8000, ...body } = params;
+  try {
+    const response = (await daemonFetch('/recall', { method: 'POST', body, timeoutMs })) as {
+      results: Array<{ id: number; score: number; content: string; timestamp: string; projectId: string | null }>;
+    };
+    return response.results.map((r) => ({ ...r, timestamp: new Date(r.timestamp) }));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Get formatted restoration context from the daemon, or null if unreachable
  */
 export async function requestDaemonRestore(params: {

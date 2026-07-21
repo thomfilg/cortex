@@ -23,6 +23,12 @@ export interface StdinReadError {
 export interface StdinData {
   transcript_path?: string;
   cwd?: string;
+  /** Hook event name (e.g. "UserPromptSubmit") when invoked as a hook */
+  hook_event_name?: string;
+  /** Session id, present in hook invocations */
+  session_id?: string;
+  /** The user's prompt text (UserPromptSubmit hook only) */
+  prompt?: string;
   model?: {
     id?: string;
     display_name?: string;
@@ -196,6 +202,25 @@ export interface SyncConfig {
   projects: string[] | null;
 }
 
+/**
+ * Opt-in automatic recall: a UserPromptSubmit hook searches memory for
+ * fragments semantically related to the user's prompt and injects the top
+ * matches as context. Relevance is gated on cosine similarity; injected
+ * fragments are deduplicated per session. Default: disabled.
+ */
+export interface RecallConfig {
+  /** Enable the UserPromptSubmit auto-recall hook */
+  auto: boolean;
+  /** Minimum cosine similarity (0-1) for a memory to be injected */
+  minScore: number;
+  /** Maximum memories injected per prompt */
+  maxResults: number;
+  /** Approximate token budget for the injected block */
+  tokenBudget: number;
+  /** Prompts shorter than this many characters are ignored */
+  minPromptLength: number;
+}
+
 export interface Config {
   statusline: StatuslineConfig;
   archive: ArchiveConfig;
@@ -206,6 +231,7 @@ export interface Config {
   daemon: DaemonConfig;
   backup: BackupConfig;
   sync: SyncConfig;
+  recall: RecallConfig;
 }
 
 // ============================================================================
@@ -294,7 +320,8 @@ export type CommandName =
   | 'daemon-stop'
   | 'compact'
   | 'backup'
-  | 'sync';
+  | 'sync'
+  | 'auto-recall';
 
 // ============================================================================
 // Analytics Types

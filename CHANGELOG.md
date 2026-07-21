@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.5.0
+
+### Features
+
+- **Opt-in auto-recall: relevant memories injected on every prompt.** A new
+  `UserPromptSubmit` hook vector-searches the archive for fragments
+  semantically related to the user's prompt and injects the top matches
+  (project-scoped) as context. Relevance is gated on raw cosine similarity
+  rather than RRF rank scores (which are nearly flat and cannot express
+  "nothing relevant here" - the common case the hook must stay silent on);
+  the default threshold (`recall.minScore` 0.62) was calibrated against a
+  real archive where related prompts scored 0.67-0.69 and off-topic prompts
+  0.53-0.54. Injected fragments are deduplicated per session
+  (`~/.cortex/recall-state.json`), capped at `recall.maxResults` (3) within
+  `recall.tokenBudget` (~500 tokens); short prompts, slash commands, and
+  `!` shell escapes are skipped. Enable with `configure recall on`
+  (`off`/`status`). Daemon mode is recommended - the search becomes one HTTP
+  call to a new `POST /recall` endpoint; without a daemon each prompt loads
+  the embedding model in-process. In daemon mode there is deliberately no
+  local fallback when the daemon is unreachable (a native/WAL database must
+  not be opened by sql.js mid-flight).
+
 ## 2.4.1
 
 ### Bug Fixes
