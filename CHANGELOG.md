@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.1
+
+### Bug Fixes
+
+- **Version-only republish so plugin updaters pick up the sharp stub.** The
+  sharp-stub fix merged after the 2.4.0 version bump, so plugin caches created
+  in that window contain a 2.4.0 build without the stub (and crash when
+  sharp's native binding was skipped at install). No code changes.
+
 ## 2.4.0
 
 ### Features

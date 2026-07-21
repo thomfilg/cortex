@@ -8393,7 +8393,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.4.0" ? "2.4.0" : "0.0.0-dev";
+var VERSION = "2.4.1" ? "2.4.1" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [
