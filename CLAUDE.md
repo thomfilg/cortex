@@ -157,9 +157,32 @@ Skills are for multi-step workflows. Atomic operations (stats, recall, save) use
 
 | Hook | Trigger | Handler | Purpose |
 |------|---------|---------|---------|
+| `UserPromptSubmit` | Each user prompt | `auto-recall` | Inject relevant memories (opt-in) |
 | `SessionStart` | New session | `session-start` | Show memory count, start analytics |
 | `PostToolUse` | After any tool | `context-check` | Monitor context, auto-save/clear |
 | `PreCompact` | Before compaction | `smart-compact` | Save + restoration context |
+
+### Auto-Recall (opt-in)
+
+When `recall.auto` is true, the `UserPromptSubmit` hook vector-searches the
+archive for fragments semantically related to the prompt and injects the top
+matches (project-scoped) as context. Relevance is gated on raw cosine
+similarity — NOT the RRF rank scores used by `cortex_recall`, which are
+nearly flat across ranks and cannot express "nothing relevant". Injected
+fragment ids are deduplicated per session (`~/.cortex/recall-state.json`,
+pruned to the 20 most recent sessions). Prompts that are too short, slash
+commands, or `!` shell escapes are skipped.
+
+Enable with `node dist/index.js configure recall on` (`off`, `status`).
+Daemon mode is recommended: with a daemon the search is one HTTP call to
+`POST /recall`; without one each prompt loads the embedding model
+in-process. In daemon mode there is deliberately NO local fallback when the
+daemon is unreachable or predates `/recall` (a native/WAL database must not
+be opened by sql.js mid-flight) — the hook stays silent instead.
+
+`recall` config keys: `auto` (default false), `minScore` (default 0.62,
+calibrated on a real archive: related prompts scored 0.67–0.69, off-topic
+0.53–0.54), `maxResults` (3), `tokenBudget` (500), `minPromptLength` (12).
 
 ## Configuration
 
@@ -209,6 +232,13 @@ Config file: `~/.cortex/config.json`
     "remote": null,
     "intervalMinutes": 60,
     "projects": null
+  },
+  "recall": {
+    "auto": false,
+    "minScore": 0.62,
+    "maxResults": 3,
+    "tokenBudget": 500,
+    "minPromptLength": 12
   }
 }
 ```

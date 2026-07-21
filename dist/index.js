@@ -599,15 +599,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs8 = __require("node:fs");
+          var fs9 = __require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs8.readFileSync(a);
+            return fs9.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs8.readFileSync(a, void 0);
+            return fs9.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -915,7 +915,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs8.readSync(d, b, 0, 256);
+                  c = fs9.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2998,8 +2998,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path5, errorMaps, issueData } = params;
-  const fullPath = [...path5, ...issueData.path || []];
+  const { data, path: path6, errorMaps, issueData } = params;
+  const fullPath = [...path6, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -3115,11 +3115,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path5, key) {
+  constructor(parent, value, path6, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path5;
+    this._path = path6;
     this._key = key;
   }
   get path() {
@@ -6612,6 +6612,13 @@ var SyncConfigSchema = external_exports.object({
   intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
   projects: external_exports.array(external_exports.string()).nullable()
 });
+var RecallConfigSchema = external_exports.object({
+  auto: external_exports.boolean(),
+  minScore: external_exports.number().min(0).max(1),
+  maxResults: external_exports.number().min(1).max(10),
+  tokenBudget: external_exports.number().min(50).max(1e4),
+  minPromptLength: external_exports.number().min(0).max(1e3)
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6621,7 +6628,8 @@ var ConfigSchema = external_exports.object({
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
-  sync: SyncConfigSchema
+  sync: SyncConfigSchema,
+  recall: RecallConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6674,6 +6682,13 @@ var DEFAULT_SYNC_CONFIG = {
   intervalMinutes: 60,
   projects: null
 };
+var DEFAULT_RECALL_CONFIG = {
+  auto: false,
+  minScore: 0.62,
+  maxResults: 3,
+  tokenBudget: 500,
+  minPromptLength: 12
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6683,7 +6698,8 @@ var DEFAULT_CONFIG = {
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
-  sync: DEFAULT_SYNC_CONFIG
+  sync: DEFAULT_SYNC_CONFIG,
+  recall: DEFAULT_RECALL_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -7103,18 +7119,18 @@ import { spawn } from "child_process";
 import * as fs2 from "fs";
 
 // src/version.ts
-var VERSION = "2.4.1" ? "2.4.1" : "0.0.0-dev";
+var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
 
 // src/daemon-client.ts
 function getDaemonBaseUrl() {
   return `http://127.0.0.1:${getDaemonPort()}`;
 }
-async function daemonFetch(path5, options = {}) {
+async function daemonFetch(path6, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${getDaemonBaseUrl()}${path5}`, {
+    const response = await fetch(`${getDaemonBaseUrl()}${path6}`, {
       method,
       headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
       body: body !== void 0 ? JSON.stringify(body) : void 0,
@@ -7123,7 +7139,7 @@ async function daemonFetch(path5, options = {}) {
     if (!response.ok && response.status !== 202) {
       const errBody = await response.text().catch(() => "");
       throw new Error(
-        `Daemon responded ${response.status} for ${path5}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
+        `Daemon responded ${response.status} for ${path6}${errBody ? `: ${errBody.slice(0, 200)}` : ""}`
       );
     }
     const text = await response.text();
@@ -7224,6 +7240,15 @@ async function requestDaemonArchive(params) {
   try {
     const result = await daemonFetch("/archive", { method: "POST", body, timeoutMs });
     return result;
+  } catch {
+    return null;
+  }
+}
+async function requestDaemonRecall(params) {
+  const { timeoutMs = 8e3, ...body } = params;
+  try {
+    const response = await daemonFetch("/recall", { method: "POST", body, timeoutMs });
+    return response.results.map((r) => ({ ...r, timestamp: new Date(r.timestamp) }));
   } catch {
     return null;
   }
@@ -8311,6 +8336,25 @@ async function hybridSearch(db, query, options = {}) {
   const sorted = withRecency.sort((a, b) => b.score - a.score).slice(0, limit);
   return sorted;
 }
+async function vectorSearch(db, query, options = {}) {
+  const {
+    projectScope = true,
+    projectId,
+    limit = 5,
+    includeAllProjects = false
+  } = options;
+  const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
+  const queryEmbedding = await embedQuery(query);
+  const results = searchByVector(db, queryEmbedding, projectFilter, limit);
+  return results.map((r) => ({
+    id: r.id,
+    score: r.score,
+    content: r.content,
+    source: "vector",
+    timestamp: r.timestamp,
+    projectId: r.projectId
+  }));
+}
 function combineWithRRF(vectorResults, keywordResults) {
   const scores = /* @__PURE__ */ new Map();
   vectorResults.forEach((result, rank) => {
@@ -8412,8 +8456,98 @@ function formatTimeAgo(date) {
   return date.toLocaleDateString();
 }
 
-// src/archive.ts
+// src/recall-auto.ts
 import * as fs4 from "fs";
+import * as path3 from "path";
+function isPromptEligible(prompt, config) {
+  const trimmed = prompt.trim();
+  if (trimmed.length < config.minPromptLength)
+    return false;
+  if (trimmed.startsWith("/") || trimmed.startsWith("!"))
+    return false;
+  if (trimmed.startsWith("[cortex:"))
+    return false;
+  return true;
+}
+function selectForInjection(results, config, alreadyInjected) {
+  const budgetChars = config.tokenBudget * 4;
+  const selected = [];
+  let usedChars = 0;
+  for (const result of results) {
+    if (selected.length >= config.maxResults)
+      break;
+    if (result.score < config.minScore)
+      continue;
+    if (alreadyInjected.has(result.id))
+      continue;
+    const content = result.content.length > 600 ? result.content.substring(0, 600) + "..." : result.content;
+    const cost = content.length + 40;
+    if (usedChars + cost > budgetChars)
+      continue;
+    usedChars += cost;
+    selected.push({ ...result, content });
+  }
+  return selected;
+}
+function formatInjection(results, projectId) {
+  const lines = [];
+  const scope = projectId ? ` (project: ${projectId})` : "";
+  lines.push(`[cortex:auto-recall] Relevant memories from past sessions${scope}:`);
+  results.forEach((result, index) => {
+    const pct = Math.round(result.score * 100);
+    const age = formatAge(result.timestamp);
+    lines.push(`${index + 1}. (${pct}% match \u2022 ${age}) ${result.content}`);
+  });
+  return lines.join("\n");
+}
+function formatAge(date) {
+  if (!date || isNaN(date.getTime()))
+    return "unknown age";
+  const days = Math.floor((Date.now() - date.getTime()) / 864e5);
+  if (days < 1)
+    return "today";
+  if (days === 1)
+    return "yesterday";
+  if (days < 30)
+    return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`;
+}
+var MAX_TRACKED_SESSIONS = 20;
+function getRecallStatePath() {
+  return path3.join(getDataDir(), "recall-state.json");
+}
+function loadRecallState() {
+  try {
+    const raw = fs4.readFileSync(getRecallStatePath(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.sessions === "object" && parsed.sessions !== null) {
+      return parsed;
+    }
+  } catch {
+  }
+  return { sessions: {} };
+}
+function getInjectedIds(state, sessionId) {
+  return new Set(state.sessions[sessionId]?.injectedIds ?? []);
+}
+function recordInjection(state, sessionId, ids) {
+  const existing = state.sessions[sessionId]?.injectedIds ?? [];
+  state.sessions[sessionId] = {
+    injectedIds: [.../* @__PURE__ */ new Set([...existing, ...ids])],
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const entries = Object.entries(state.sessions).sort((a, b) => (b[1].updatedAt || "").localeCompare(a[1].updatedAt || "")).slice(0, MAX_TRACKED_SESSIONS);
+  state.sessions = Object.fromEntries(entries);
+  try {
+    fs4.mkdirSync(getDataDir(), { recursive: true });
+    atomicWriteFileSync(getRecallStatePath(), JSON.stringify(state, null, 2));
+  } catch {
+  }
+}
+
+// src/archive.ts
+import * as fs5 from "fs";
 import * as readline from "readline";
 
 // src/logger.ts
@@ -8522,10 +8656,10 @@ async function parseTranscript(transcriptPath, startLine = 0) {
       parseErrors: 0
     }
   };
-  if (!fs4.existsSync(transcriptPath)) {
+  if (!fs5.existsSync(transcriptPath)) {
     return result;
   }
-  const fileStream = fs4.createReadStream(transcriptPath);
+  const fileStream = fs5.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -9060,16 +9194,16 @@ function formatTimeAgo2(date) {
 }
 
 // src/analytics.ts
-import * as fs5 from "fs";
+import * as fs6 from "fs";
 var ANALYTICS_VERSION = 1;
 var MAX_SESSIONS_TO_KEEP = 100;
 function getAnalytics() {
   const analyticsPath = getAnalyticsPath();
-  if (!fs5.existsSync(analyticsPath)) {
+  if (!fs6.existsSync(analyticsPath)) {
     return createEmptyAnalytics();
   }
   try {
-    const content = fs5.readFileSync(analyticsPath, "utf8");
+    const content = fs6.readFileSync(analyticsPath, "utf8");
     const data = JSON.parse(content);
     if (data.version !== ANALYTICS_VERSION) {
       return migrateAnalytics(data);
@@ -9085,7 +9219,7 @@ function saveAnalytics(data) {
   if (data.sessions.length > MAX_SESSIONS_TO_KEEP) {
     data.sessions = data.sessions.slice(-MAX_SESSIONS_TO_KEEP);
   }
-  fs5.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
+  fs6.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
 }
 function createEmptyAnalytics() {
   return {
@@ -9151,8 +9285,8 @@ function generateSessionId() {
 }
 
 // src/backup.ts
-import * as fs6 from "fs";
-import * as path3 from "path";
+import * as fs7 from "fs";
+import * as path4 from "path";
 import * as zlib from "zlib";
 import { pipeline } from "stream/promises";
 import { execFile } from "child_process";
@@ -9168,11 +9302,11 @@ var EMPTY_STATE = {
   lastDurationMs: null
 };
 function getBackupStatePath() {
-  return path3.join(getDataDir(), "backup-state.json");
+  return path4.join(getDataDir(), "backup-state.json");
 }
 function loadBackupState() {
   try {
-    const raw = fs6.readFileSync(getBackupStatePath(), "utf8");
+    const raw = fs7.readFileSync(getBackupStatePath(), "utf8");
     return { ...EMPTY_STATE, ...JSON.parse(raw) };
   } catch {
     return { ...EMPTY_STATE };
@@ -9180,7 +9314,7 @@ function loadBackupState() {
 }
 function saveBackupState(state) {
   try {
-    fs6.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
+    fs7.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
   } catch {
   }
 }
@@ -9213,8 +9347,8 @@ async function rcloneAvailable() {
   }
 }
 function snapshotTmpDir() {
-  const dir = path3.join(getDataDir(), "backup-tmp");
-  fs6.mkdirSync(dir, { recursive: true });
+  const dir = path4.join(getDataDir(), "backup-tmp");
+  fs7.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function snapshotName() {
@@ -9223,36 +9357,36 @@ function snapshotName() {
 }
 function createSnapshotFromDb(db, kind, outPath) {
   if (kind === "native") {
-    if (fs6.existsSync(outPath))
-      fs6.unlinkSync(outPath);
+    if (fs7.existsSync(outPath))
+      fs7.unlinkSync(outPath);
     db.run("VACUUM INTO ?", [outPath]);
   } else {
-    fs6.writeFileSync(outPath, db.export());
+    fs7.writeFileSync(outPath, db.export());
   }
 }
 async function createSnapshotFromFile(outPath) {
   const dbPath = getDatabasePath();
-  if (!fs6.existsSync(dbPath)) {
+  if (!fs7.existsSync(dbPath)) {
     throw new Error(`Database not found at ${dbPath}`);
   }
   const native = await tryOpenNative(dbPath);
   if (native) {
     try {
-      if (fs6.existsSync(outPath))
-        fs6.unlinkSync(outPath);
+      if (fs7.existsSync(outPath))
+        fs7.unlinkSync(outPath);
       native.run("VACUUM INTO ?", [outPath]);
       return;
     } finally {
       native.close();
     }
   }
-  fs6.copyFileSync(dbPath, outPath);
+  fs7.copyFileSync(dbPath, outPath);
 }
 async function gzipFile(srcPath, destPath) {
   await pipeline(
-    fs6.createReadStream(srcPath),
+    fs7.createReadStream(srcPath),
     zlib.createGzip({ level: 6 }),
-    fs6.createWriteStream(destPath)
+    fs7.createWriteStream(destPath)
   );
 }
 async function rotateRemote(remote, keep) {
@@ -9287,8 +9421,8 @@ async function runBackup(source = {}) {
   const started = Date.now();
   const tmpDir2 = snapshotTmpDir();
   const name = snapshotName();
-  const rawPath = path3.join(tmpDir2, name.replace(/\.gz$/, ""));
-  const gzPath = path3.join(tmpDir2, name);
+  const rawPath = path4.join(tmpDir2, name.replace(/\.gz$/, ""));
+  const gzPath = path4.join(tmpDir2, name);
   try {
     if (source.db && source.kind) {
       createSnapshotFromDb(source.db, source.kind, rawPath);
@@ -9296,7 +9430,7 @@ async function runBackup(source = {}) {
       await createSnapshotFromFile(rawPath);
     }
     await gzipFile(rawPath, gzPath);
-    const sizeBytes = fs6.statSync(gzPath).size;
+    const sizeBytes = fs7.statSync(gzPath).size;
     await rclone(["copyto", gzPath, `${config.remote}/${name}`]);
     const rotatedOut = await rotateRemote(config.remote, config.keep);
     const result = {
@@ -9325,7 +9459,7 @@ async function runBackup(source = {}) {
   } finally {
     for (const p of [rawPath, gzPath]) {
       try {
-        fs6.unlinkSync(p);
+        fs7.unlinkSync(p);
       } catch {
       }
     }
@@ -9333,9 +9467,9 @@ async function runBackup(source = {}) {
 }
 
 // src/sync.ts
-import * as fs7 from "fs";
+import * as fs8 from "fs";
 import * as os3 from "os";
-import * as path4 from "path";
+import * as path5 from "path";
 import * as zlib2 from "zlib";
 import * as crypto3 from "crypto";
 var CHANGELOG_SUFFIX = ".jsonl.gz";
@@ -9352,11 +9486,11 @@ var EMPTY_SYNC_STATE = {
   peers: {}
 };
 function getSyncStatePath() {
-  return path4.join(getDataDir(), "sync-state.json");
+  return path5.join(getDataDir(), "sync-state.json");
 }
 function loadSyncState() {
   try {
-    const raw = fs7.readFileSync(getSyncStatePath(), "utf8");
+    const raw = fs8.readFileSync(getSyncStatePath(), "utf8");
     const parsed = JSON.parse(raw);
     return { ...EMPTY_SYNC_STATE, ...parsed, peers: { ...parsed.peers ?? {} } };
   } catch {
@@ -9364,7 +9498,7 @@ function loadSyncState() {
   }
 }
 function saveSyncState(state) {
-  fs7.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
+  fs8.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
 }
 function ensureDeviceId(state) {
   if (state.deviceId)
@@ -9383,8 +9517,8 @@ function isSyncDue(config) {
   return Date.now() - new Date(state.lastSyncAt).getTime() >= config.intervalMinutes * 60 * 1e3;
 }
 function tmpDir() {
-  const dir = path4.join(getDataDir(), "sync-tmp");
-  fs7.mkdirSync(dir, { recursive: true });
+  const dir = path5.join(getDataDir(), "sync-tmp");
+  fs8.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function seqName(seq) {
@@ -9452,14 +9586,14 @@ async function pushChanges(db, state, config, remote) {
   for (let offset = 0; offset < entries.length; offset += MAX_LINES_PER_FILE) {
     const chunk = entries.slice(offset, offset + MAX_LINES_PER_FILE);
     const name = seqName(state.nextSeq);
-    const localPath = path4.join(tmpDir(), name);
+    const localPath = path5.join(tmpDir(), name);
     try {
       const jsonl = chunk.map((e) => JSON.stringify(e.line)).join("\n") + "\n";
-      fs7.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
+      fs8.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
       await rclone(["copyto", localPath, `${remote}/${deviceId}/${name}`]);
     } finally {
       try {
-        fs7.unlinkSync(localPath);
+        fs8.unlinkSync(localPath);
       } catch {
       }
     }
@@ -9542,15 +9676,15 @@ async function pullChanges(db, state, remote) {
         result.peers.push(peer);
       }
       for (const file of pending) {
-        const localPath = path4.join(tmpDir(), `${peer}-${file.name}`);
+        const localPath = path5.join(tmpDir(), `${peer}-${file.name}`);
         let lines;
         try {
           await rclone(["copyto", `${remote}/${peer}/${file.name}`, localPath]);
-          const jsonl = zlib2.gunzipSync(fs7.readFileSync(localPath)).toString("utf8");
+          const jsonl = zlib2.gunzipSync(fs8.readFileSync(localPath)).toString("utf8");
           lines = jsonl.split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
         } finally {
           try {
-            fs7.unlinkSync(localPath);
+            fs8.unlinkSync(localPath);
           } catch {
           }
         }
@@ -9593,9 +9727,9 @@ async function runSync(db, options = {}) {
 }
 
 // src/index.ts
-import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync4 } from "fs";
+import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync5 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 var ANSI = {
   reset: "\x1B[0m",
   bold: "\x1B[1m",
@@ -9611,14 +9745,14 @@ var ANSI = {
   // Claude terracotta/brick #D97757
 };
 var DEBUG_ENABLED = process.env.CORTEX_DEBUG === "1" || process.env.CORTEX_DEBUG === "true";
-var DEBUG_LOG_DIR = join5(homedir2(), ".cortex", "logs");
-var DEBUG_LOG_FILE = join5(DEBUG_LOG_DIR, "hook-debug.log");
+var DEBUG_LOG_DIR = join6(homedir2(), ".cortex", "logs");
+var DEBUG_LOG_FILE = join6(DEBUG_LOG_DIR, "hook-debug.log");
 function debugLog(context, message, data) {
   if (!DEBUG_ENABLED)
     return;
   try {
     if (!existsSync7(DEBUG_LOG_DIR)) {
-      mkdirSync4(DEBUG_LOG_DIR, { recursive: true });
+      mkdirSync5(DEBUG_LOG_DIR, { recursive: true });
     }
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
     const logEntry = `[${timestamp}] [${context}] ${message}${data ? "\n  DATA: " + JSON.stringify(data, null, 2).replace(/\n/g, "\n  ") : ""}
@@ -9694,6 +9828,9 @@ async function main() {
         break;
       case "sync":
         await handleSync(args.slice(1));
+        break;
+      case "auto-recall":
+        await handleAutoRecall();
         break;
       case "configure":
         await handleConfigure(args.slice(1));
@@ -10241,6 +10378,50 @@ async function handleRecall(args) {
   });
   console.log(formatSearchResults(results));
 }
+async function handleAutoRecall() {
+  const stdin = await readStdin();
+  const config = loadConfig();
+  if (!config.recall.auto)
+    return;
+  const prompt = stdin?.prompt ?? "";
+  if (!isPromptEligible(prompt, config.recall))
+    return;
+  const sessionId = stdin?.session_id ?? "unknown-session";
+  const projectId = stdin?.cwd ? getProjectId(stdin.cwd) : null;
+  const state = loadRecallState();
+  const alreadyInjected = getInjectedIds(state, sessionId);
+  const fetchLimit = config.recall.maxResults * 3;
+  let results = await requestDaemonRecall({
+    query: prompt,
+    projectId,
+    limit: fetchLimit,
+    minScore: config.recall.minScore
+  });
+  if (results === null) {
+    if (config.daemon.enabled) {
+      debugLog("handleAutoRecall", "Daemon unreachable or missing /recall; skipping (daemon mode)");
+      return;
+    }
+    try {
+      const db = await initDb();
+      results = await vectorSearch(db, prompt, {
+        projectScope: projectId !== null,
+        projectId: projectId ?? void 0,
+        limit: fetchLimit
+      });
+    } catch (error) {
+      debugLog("handleAutoRecall", "Local search failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return;
+    }
+  }
+  const selected = selectForInjection(results, config.recall, alreadyInjected);
+  if (selected.length === 0)
+    return;
+  console.log(formatInjection(selected, projectId));
+  recordInjection(state, sessionId, selected.map((r) => r.id));
+}
 async function handleStats() {
   const stdin = await readStdin();
   const db = await initDb();
@@ -10280,12 +10461,12 @@ async function handleSetup(setupArgs = []) {
   const db = await initDb();
   saveDb(db);
   console.log("  \u2713 Database initialized");
-  const fs8 = await import("fs");
-  const path5 = await import("path");
+  const fs9 = await import("fs");
+  const path6 = await import("path");
   const os4 = await import("os");
   const pluginDir = new URL(".", import.meta.url).pathname.replace("/dist/", "");
   const nodeModulesPath = `${pluginDir}/node_modules`;
-  if (!fs8.existsSync(nodeModulesPath)) {
+  if (!fs9.existsSync(nodeModulesPath)) {
     console.log("  \u23F3 Installing dependencies (first run only)...");
     const { execSync: execSync2 } = await import("child_process");
     try {
@@ -10312,8 +10493,8 @@ async function handleSetup(setupArgs = []) {
     return;
   }
   console.log("  \u23F3 Configuring statusline...");
-  const claudeDir = path5.join(os4.homedir(), ".claude");
-  const claudeSettingsPath = path5.join(claudeDir, "settings.json");
+  const claudeDir = path6.join(os4.homedir(), ".claude");
+  const claudeSettingsPath = path6.join(claudeDir, "settings.json");
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || pluginDir;
   const statuslineResult = configureClaudeStatusline(claudeSettingsPath, pluginRoot);
   if (statuslineResult.configured && statuslineResult.chained) {
@@ -10393,6 +10574,29 @@ async function handleConfigure(args) {
     }
     return;
   }
+  if (args[0] === "recall") {
+    const action = args[1];
+    const current = loadConfig();
+    if (action === "on" || action === "enable") {
+      updateConfig({ recall: { ...current.recall, auto: true } });
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-recall ${ANSI.green}enabled${ANSI.reset}`);
+      console.log(`  Relevant memories (similarity >= ${current.recall.minScore}) are injected on each prompt.`);
+      if (!current.daemon.enabled) {
+        console.log(`  ${ANSI.yellow}Tip:${ANSI.reset} enable daemon mode (configure daemon on) - without it each prompt loads the embedding model.`);
+      }
+      console.log("  Restart Claude Code sessions to activate the hook.");
+    } else if (action === "off" || action === "disable") {
+      updateConfig({ recall: { ...current.recall, auto: false } });
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-recall ${ANSI.yellow}disabled${ANSI.reset}`);
+    } else {
+      console.log(`Auto-recall:  ${current.recall.auto ? "enabled" : "disabled"}`);
+      console.log(`  minScore:        ${current.recall.minScore} (cosine similarity threshold)`);
+      console.log(`  maxResults:      ${current.recall.maxResults}`);
+      console.log(`  tokenBudget:     ${current.recall.tokenBudget}`);
+      console.log(`  minPromptLength: ${current.recall.minPromptLength}`);
+    }
+    return;
+  }
   const preset = args[0];
   if (preset && ["full", "essential", "minimal"].includes(preset)) {
     const config = applyPreset(preset);
@@ -10416,6 +10620,11 @@ async function handleConfigure(args) {
   console.log("  daemon on     - Share ONE database + embedding model across all sessions");
   console.log("  daemon off    - Classic per-process mode (default)");
   console.log("  daemon status - Show daemon mode config and process state");
+  console.log("");
+  console.log("Auto-recall:");
+  console.log("  recall on     - Inject relevant memories on each prompt (UserPromptSubmit)");
+  console.log("  recall off    - Disable auto-recall (default)");
+  console.log("  recall status - Show auto-recall config");
 }
 async function handleTestEmbed(text) {
   console.log(`${ANSI.brick}\u03A8${ANSI.reset} Testing embedding for: "${text}"`);
@@ -10739,11 +10948,15 @@ export {
   compactDatabase,
   configureClaudeStatusline,
   deleteMemory,
+  embedQuery,
   ensureDeviceId,
   formatDuration,
+  formatInjection,
   getBackupStatePath,
   getContextPercent,
+  getInjectedIds,
   getProjectId,
+  getRecallStatePath,
   getStorageKind,
   getSyncStatePath,
   handleCheckDb,
@@ -10761,15 +10974,21 @@ export {
   initDb,
   insertMemory,
   isBackupDue,
+  isPromptEligible,
   isSyncDue,
   loadAutoSaveState,
   loadBackupState,
+  loadConfig,
+  loadRecallState,
   loadSyncState,
   markAutoSaved,
   readStdinWithResult,
+  recordInjection,
   resetAutoSaveState,
   runBackup,
   runSync,
   saveDb,
-  shouldAutoSave
+  selectForInjection,
+  shouldAutoSave,
+  vectorSearch
 };

@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { z } from 'zod';
-import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig, SyncConfig } from './types.js';
+import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig, SyncConfig, RecallConfig } from './types.js';
 
 // ============================================================================
 // Zod Schemas for Config Validation
@@ -72,6 +72,14 @@ const SyncConfigSchema = z.object({
   projects: z.array(z.string()).nullable(),
 });
 
+const RecallConfigSchema = z.object({
+  auto: z.boolean(),
+  minScore: z.number().min(0).max(1),
+  maxResults: z.number().min(1).max(10),
+  tokenBudget: z.number().min(50).max(10000),
+  minPromptLength: z.number().min(0).max(1000),
+});
+
 const ConfigSchema = z.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -82,6 +90,7 @@ const ConfigSchema = z.object({
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
   sync: SyncConfigSchema,
+  recall: RecallConfigSchema,
 });
 
 // ============================================================================
@@ -150,6 +159,19 @@ export const DEFAULT_SYNC_CONFIG: SyncConfig = {
   projects: null,
 };
 
+// Auto-recall is opt-in: injecting context on every prompt is a behavior
+// change users must choose. minScore is calibrated empirically against a
+// real archive (bge-small-en-v1.5, query/passage prefixes): related
+// prompts scored 0.67-0.69, off-topic prompts 0.53-0.54 - 0.62 splits
+// the observed gap.
+export const DEFAULT_RECALL_CONFIG: RecallConfig = {
+  auto: false,
+  minScore: 0.62,
+  maxResults: 3,
+  tokenBudget: 500,
+  minPromptLength: 12,
+};
+
 export const DEFAULT_CONFIG: Config = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -160,6 +182,7 @@ export const DEFAULT_CONFIG: Config = {
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
   sync: DEFAULT_SYNC_CONFIG,
+  recall: DEFAULT_RECALL_CONFIG,
 };
 
 // ============================================================================
@@ -325,7 +348,7 @@ export function cleanupActiveConfigTempFile(): void {
  * Atomic file write helper
  * Uses temp-file + rename to prevent corruption on crash
  */
-function atomicWriteFileSync(filePath: string, content: string): void {
+export function atomicWriteFileSync(filePath: string, content: string): void {
   const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
   try {
     activeConfigTempPath = tempPath;

@@ -27,6 +27,7 @@ import { recordSavePoint } from './analytics.js';
 import { getDaemonHealth, stopDaemon } from './daemon-client.js';
 import { runBackup, isBackupDue } from './backup.js';
 import { runSync, isSyncDue, type SyncOptions } from './sync.js';
+import { vectorSearch } from './search.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
 
@@ -284,6 +285,44 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const db = await getDb();
       const result = await enqueue(() => runSync(db, body));
       respondJson(res, 200, result);
+      return;
+    }
+
+    case 'POST /recall': {
+      const body = parseBody<{
+        query?: string;
+        projectId?: string | null;
+        limit?: number;
+        minScore?: number;
+      }>(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: 'Invalid JSON body' });
+        return;
+      }
+      if (!body.query) {
+        respondJson(res, 400, { error: 'query is required' });
+        return;
+      }
+      // Read-only: not enqueued behind the write chain. Cosine scores are
+      // returned raw so the caller applies its own relevance threshold.
+      const db = await getDb();
+      const results = await vectorSearch(db, body.query, {
+        projectScope: body.projectId != null,
+        projectId: body.projectId ?? undefined,
+        limit: body.limit ?? 10,
+      });
+      const minScore = body.minScore ?? 0;
+      respondJson(res, 200, {
+        results: results
+          .filter((r) => r.score >= minScore)
+          .map((r) => ({
+            id: r.id,
+            score: r.score,
+            content: r.content,
+            timestamp: r.timestamp.toISOString(),
+            projectId: r.projectId,
+          })),
+      });
       return;
     }
 

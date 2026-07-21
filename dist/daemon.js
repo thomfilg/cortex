@@ -6513,6 +6513,13 @@ var SyncConfigSchema = external_exports.object({
   intervalMinutes: external_exports.number().min(5).max(60 * 24 * 30),
   projects: external_exports.array(external_exports.string()).nullable()
 });
+var RecallConfigSchema = external_exports.object({
+  auto: external_exports.boolean(),
+  minScore: external_exports.number().min(0).max(1),
+  maxResults: external_exports.number().min(1).max(10),
+  tokenBudget: external_exports.number().min(50).max(1e4),
+  minPromptLength: external_exports.number().min(0).max(1e3)
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6522,7 +6529,8 @@ var ConfigSchema = external_exports.object({
   awareness: AwarenessConfigSchema,
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
-  sync: SyncConfigSchema
+  sync: SyncConfigSchema,
+  recall: RecallConfigSchema
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6575,6 +6583,13 @@ var DEFAULT_SYNC_CONFIG = {
   intervalMinutes: 60,
   projects: null
 };
+var DEFAULT_RECALL_CONFIG = {
+  auto: false,
+  minScore: 0.62,
+  maxResults: 3,
+  tokenBudget: 500,
+  minPromptLength: 12
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6584,7 +6599,8 @@ var DEFAULT_CONFIG = {
   awareness: DEFAULT_AWARENESS_CONFIG,
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
-  sync: DEFAULT_SYNC_CONFIG
+  sync: DEFAULT_SYNC_CONFIG,
+  recall: DEFAULT_RECALL_CONFIG
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -7888,6 +7904,25 @@ async function hybridSearch(db, query, options = {}) {
   const sorted = withRecency.sort((a, b) => b.score - a.score).slice(0, limit);
   return sorted;
 }
+async function vectorSearch(db, query, options = {}) {
+  const {
+    projectScope = true,
+    projectId,
+    limit = 5,
+    includeAllProjects = false
+  } = options;
+  const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
+  const queryEmbedding = await embedQuery(query);
+  const results = searchByVector(db, queryEmbedding, projectFilter, limit);
+  return results.map((r) => ({
+    id: r.id,
+    score: r.score,
+    content: r.content,
+    source: "vector",
+    timestamp: r.timestamp,
+    projectId: r.projectId
+  }));
+}
 function combineWithRRF(vectorResults, keywordResults) {
   const scores = /* @__PURE__ */ new Map();
   vectorResults.forEach((result, rank) => {
@@ -8691,7 +8726,7 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.4.1" ? "2.4.1" : "0.0.0-dev";
+var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
 
 // src/tools.ts
 var TOOLS = [
@@ -10017,6 +10052,34 @@ async function handleRequest(req, res) {
       const db = await getDb();
       const result = await enqueue(() => runSync(db, body));
       respondJson(res, 200, result);
+      return;
+    }
+    case "POST /recall": {
+      const body = parseBody(await readBody(req));
+      if (!body) {
+        respondJson(res, 400, { error: "Invalid JSON body" });
+        return;
+      }
+      if (!body.query) {
+        respondJson(res, 400, { error: "query is required" });
+        return;
+      }
+      const db = await getDb();
+      const results = await vectorSearch(db, body.query, {
+        projectScope: body.projectId != null,
+        projectId: body.projectId ?? void 0,
+        limit: body.limit ?? 10
+      });
+      const minScore = body.minScore ?? 0;
+      respondJson(res, 200, {
+        results: results.filter((r) => r.score >= minScore).map((r) => ({
+          id: r.id,
+          score: r.score,
+          content: r.content,
+          timestamp: r.timestamp.toISOString(),
+          projectId: r.projectId
+        }))
+      });
       return;
     }
     case "POST /shutdown": {
