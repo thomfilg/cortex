@@ -19,6 +19,9 @@ authentication from **environment variables only**.
 - **`user`**: `CORTEX_USER` env → `.cortex`/global config → **OS username**.
 - **`environment`**: dynamic. `CORTEX_ENVIRONMENT` env → config → auto-detect
   (`claude-web` / `<user>-wsl` / `<user>-<platform>`).
+- **`category`**: generalization axis chosen per-write —
+  `global` | `user` | `environment` | `project` (default `project`). Drives
+  automatic recall scoping; overridable via a `scope` arg on `cortex_recall`.
 - **Auth**: `CORTEX_REMOTE_TOKEN` env only. Never persisted to any config file.
 - **Config precedence**: env vars > project `./.cortex/config.json` > global
   `~/.cortex/config.json` > defaults.
@@ -49,6 +52,9 @@ Auto-detect for `environment`:
 `getProjectId` (`src/stdin.ts:134`) stays as the basename fallback used by
 `resolveProject`.
 
+`category` is not resolved here — it is chosen per-write (default `project`),
+not derived from the environment. See §C1.
+
 ### B. Config layering — `src/config.ts`
 
 1. `getProjectConfigDir(cwd)`: walk up from `cwd` looking for a `.cortex/`
@@ -78,23 +84,59 @@ Additive `ALTER TABLE`, mirroring the existing `origin_device` migration
 ```sql
 ALTER TABLE memories ADD COLUMN user TEXT;
 ALTER TABLE memories ADD COLUMN environment TEXT;
+ALTER TABLE memories ADD COLUMN category TEXT DEFAULT 'project';
 -- `project`: reuse existing project_id column; expose as `project` in the
 -- query/return layer. (No destructive rename in v1 to keep sql.js/native and
 -- old DBs compatible.)
 ```
 
-Old rows keep `NULL` (treated as "legacy/unknown"). Indexes on `(user)`,
-`(environment)`, `(project_id)` for filtered recall.
+Old rows keep `NULL` (treated as "legacy/unknown"; NULL category behaves as
+`project`). Indexes on `(user)`, `(environment)`, `(project_id)`, `(category)`
+for filtered recall.
 
 Write paths that must stamp the new values:
-- `storeManualMemory` (`cortex_remember`)
-- `archiveSession` / `appendSessionTurns` (`src/archive.ts`)
-- sync import `applyLines` (`src/sync.ts`) — carry origin identity, don't
-  overwrite with the importer's identity.
+- `storeManualMemory` (`cortex_remember`) — also accepts a `category` enum
+- `archiveSession` / `appendSessionTurns` (`src/archive.ts`) — default `project`
+- sync import `applyLines` (`src/sync.ts`) — carry origin identity + category,
+  don't overwrite with the importer's identity.
 
-Read paths gain optional filters `{ user?, environment?, project? }`:
-- `searchByVector`, `searchByLike`, `hybridSearch` (`src/search.ts`,
-  `database.ts`). Default recall = unfiltered = whole shared brain.
+Read paths (`searchByVector`, `searchByLike`, `hybridSearch` in `src/search.ts`,
+`database.ts`) gain optional filters `{ user?, environment?, project? }` **and**
+category-aware scoping (see §C1).
+
+### C1. `category` — generalization axis / smart-scoped recall
+
+`user`/`project`/`environment` record **who/where** a memory came from.
+`category` records **where the knowledge is true**, which lets recall widen or
+narrow automatically:
+
+| `category` | Holds across | Recall scopes by | Example |
+|-----------|--------------|------------------|---------|
+| `global` | everything | *(no filter)* | "user prefers conventional commits" |
+| `user` | all machines & projects | `user` | "reviews PRs before merging" |
+| `environment` | all projects on that machine/context | `environment` | "WSL: node-gyp needs python3 symlink" |
+| `project` *(default)* | this codebase | `project` | "build runs build:daemon via esbuild" |
+
+**Default recall = a union each category self-selects into**, given the
+session's resolved identity:
+
+```sql
+WHERE category = 'global'
+   OR (category = 'user'        AND user        = :user)
+   OR (category = 'environment' AND environment = :environment)
+   OR (category IN ('project') OR category IS NULL) AND project = :project
+```
+
+A session sees: everything global + its user prefs + this machine's environment
+lore + this project's specifics — never another project's internals.
+
+**Explicit override** on `cortex_recall` via a `scope` arg for deliberate
+widen/narrow:
+- environment bug → `scope: 'environment'` drops the project constraint →
+  cross-project fixes for that machine.
+- tight focus → `scope: 'project'` → project rows only.
+
+`category` is plain `TEXT` — vocabulary stays extensible without migration.
 
 ### D. Sync changelog — `src/sync.ts`
 
