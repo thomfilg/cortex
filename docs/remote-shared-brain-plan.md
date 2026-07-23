@@ -11,10 +11,11 @@ Branch: `claude/plugin-remote-server-adapter-25px4k`.
 - ✅ **E/F. Remote transport + auth** — `remote` mode in `daemon-client.ts`, server mode in
   `daemon.ts` (`daemon-auth.ts`: bind `0.0.0.0` under `CORTEX_SERVER`, `CORTEX_SERVER_TOKEN`
   bearer auth), proxy wiring in `mcp-server.ts`, local-ownership assumptions neutralized.
+- ✅ **Remote transcript archive** — `parseTranscriptContent` + `archiveSession({transcriptContent,
+  identity})`; the MCP proxy uploads transcript content and injects client identity so
+  `cortex_save`/`cortex_archive` work over remote with correct attribution. All content-based ops
+  work over remote today.
 - ⬜ **D. Sync changelog identity fields** — carry `user`/`environment` across devices (follow-up).
-- ⬜ **Remote transcript archive** — `/archive` reads the transcript server-side; remote needs a
-  content-upload endpoint so `cortex_save` works against a remote (follow-up). Content-based ops
-  (`cortex_remember`, `cortex_recall`, restore, stats, management) work over remote today.
 - ⬜ **Hook paths over remote** — auto-recall/statusline/auto-archive hooks still gate on
   `daemon.enabled`; routing them through remote is a follow-up (MCP tool surface already works).
 

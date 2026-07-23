@@ -85,19 +85,8 @@ export async function parseTranscript(
   transcriptPath: string,
   startLine: number = 0
 ): Promise<ParseResult> {
-  const result: ParseResult = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0,
-    },
-  };
-
   if (!fs.existsSync(transcriptPath)) {
-    return result;
+    return emptyParseResult();
   }
 
   const fileStream = fs.createReadStream(transcriptPath);
@@ -106,12 +95,48 @@ export async function parseTranscript(
     crlfDelay: Infinity,
   });
 
+  return parseTranscriptLines(rl, startLine);
+}
+
+/**
+ * Parse transcript JSONL from an in-memory string (used by the remote
+ * shared-brain path, where the client uploads content the server cannot
+ * read off disk). Behaves identically to parseTranscript.
+ */
+export function parseTranscriptContent(
+  content: string,
+  startLine: number = 0
+): Promise<ParseResult> {
+  // Split on both LF and CRLF, matching readline's crlfDelay: Infinity.
+  const lines = content.split(/\r?\n/);
+  // A trailing newline yields a final empty element; drop it so line counts
+  // match the file-streamed path.
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+
+function emptyParseResult(): ParseResult {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 },
+  };
+}
+
+/**
+ * Shared transcript parsing loop over any line source (file stream or array).
+ */
+async function parseTranscriptLines(
+  lines: AsyncIterable<string> | Iterable<string>,
+  startLine: number
+): Promise<ParseResult> {
+  const result = emptyParseResult();
+
   // Track tool IDs to names to filter outputs intelligently
   // Persists across lines since tool_use and tool_result are separated
   const toolIdMap = new Map<string, string>();
 
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines as AsyncIterable<string>) {
     currentLine++;
 
     if (currentLine <= startLine) {
@@ -573,6 +598,17 @@ export async function archiveSession(
   projectId: string | null,
   options: {
     onProgress?: (current: number, total: number) => void;
+    /**
+     * Remote path: parse this uploaded content instead of reading
+     * transcriptPath off disk (the server can't see the client's filesystem).
+     */
+    transcriptContent?: string;
+    /**
+     * Identity override so a memory is attributed to the CLIENT that
+     * uploaded it, not the server that stored it. Falls back to server-side
+     * resolution when absent (local/daemon mode).
+     */
+    identity?: { user: string | null; environment: string | null };
   } = {}
 ): Promise<ArchiveResult> {
   const config = loadConfig();
@@ -580,10 +616,11 @@ export async function archiveSession(
 
   // Shared-brain identity stamped onto every archived fragment. Archived
   // session content is project work, so category defaults to 'project'; the
-  // project itself is carried by projectId (the project_id column).
+  // project itself is carried by projectId (the project_id column). In remote
+  // mode the client supplies its own user/environment (see options.identity).
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
     category: 'project' as const,
   };
 
@@ -598,8 +635,11 @@ export async function archiveSession(
   // Incremental processing: get last line
   const startLine = getSessionProgress(db, sessionId);
 
-  // Parse transcript from last position
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  // Parse transcript from last position. Prefer uploaded content (remote path)
+  // over reading the file, since the server cannot read the client's disk.
+  const { messages, stats: parseStats } = options.transcriptContent !== undefined
+    ? await parseTranscriptContent(options.transcriptContent, startLine)
+    : await parseTranscript(transcriptPath, startLine);
 
   if (messages.length === 0) {
     // Even if no messages, we might have skipped lines effectively

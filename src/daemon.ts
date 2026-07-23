@@ -67,12 +67,19 @@ interface ArchiveRequestBody {
   contextPercent?: number;
   markAutoSave?: boolean;
   async?: boolean;
+  /** Remote path: uploaded transcript content the server parses in place. */
+  transcriptContent?: string;
+  /** Client identity override for attribution (remote path). */
+  identity?: { user: string | null; environment: string | null };
 }
 
 async function runArchive(body: ArchiveRequestBody): Promise<{ archived: number; skipped: number; duplicates: number; formatted: string }> {
   const db = await getDb();
   const projectId = body.projectId ?? null;
-  const result = await archiveSession(db, body.transcriptPath, projectId);
+  const result = await archiveSession(db, body.transcriptPath, projectId, {
+    transcriptContent: body.transcriptContent,
+    identity: body.identity,
+  });
 
   if (body.markAutoSave) {
     // Update shared auto-save state so statuslines across sessions reflect it.

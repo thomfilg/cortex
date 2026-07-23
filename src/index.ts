@@ -14,7 +14,7 @@ import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, search
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, vectorSearch, formatSearchResults } from './search.js';
 import { isPromptEligible, selectForInjection, formatInjection, loadRecallState, getInjectedIds, recordInjection, getRecallStatePath } from './recall-auto.js';
-import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext } from './archive.js';
+import { archiveSession, formatArchiveResult, buildRestorationContext, formatRestorationContext, parseTranscript, parseTranscriptContent } from './archive.js';
 import { startSession, recordSavePoint } from './analytics.js';
 import { runBackup, isBackupDue, loadBackupState, getBackupStatePath, type BackupResult } from './backup.js';
 import { runSync, isSyncDue, loadSyncState, getSyncStatePath, ensureDeviceId, type SyncResult } from './sync.js';
@@ -1728,7 +1728,9 @@ export {
   isAuthorized,
   spawnDaemonDetached,
   stopDaemon,
-  ensureDaemon
+  ensureDaemon,
+  parseTranscript,
+  parseTranscriptContent
 };
 
 // Run main only when executed directly (not when imported)

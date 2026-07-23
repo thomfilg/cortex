@@ -8276,27 +8276,33 @@ var VALUABLE_PATTERNS = [
   /config|setting|option|parameter/i
 ];
 async function parseTranscript(transcriptPath, startLine = 0) {
-  const result = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0
-    }
-  };
   if (!fs4.existsSync(transcriptPath)) {
-    return result;
+    return emptyParseResult();
   }
   const fileStream = fs4.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
   });
+  return parseTranscriptLines(rl, startLine);
+}
+function parseTranscriptContent(content, startLine = 0) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+function emptyParseResult() {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 }
+  };
+}
+async function parseTranscriptLines(lines, startLine) {
+  const result = emptyParseResult();
   const toolIdMap = /* @__PURE__ */ new Map();
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines) {
     currentLine++;
     if (currentLine <= startLine) {
       result.stats.totalLines++;
@@ -8597,8 +8603,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
     category: "project"
   };
   const result = {
@@ -8608,7 +8614,7 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   };
   const sessionId = getSessionId(transcriptPath);
   const startLine = getSessionProgress(db, sessionId);
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  const { messages, stats: parseStats } = options.transcriptContent !== void 0 ? await parseTranscriptContent(options.transcriptContent, startLine) : await parseTranscript(transcriptPath, startLine);
   if (messages.length === 0) {
     if (parseStats.totalLines > startLine) {
       updateSessionProgress(db, sessionId, parseStats.totalLines);
@@ -9198,8 +9204,8 @@ async function handleRemember(db, params) {
   const embedding = await embedQuery(textToEmbed);
   const config = loadConfig();
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: params.user !== void 0 ? params.user : resolveUser(config),
+    environment: params.environment !== void 0 ? params.environment : resolveEnvironment(config),
     category: category && MEMORY_CATEGORIES.includes(category) ? category : "project"
   };
   const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
@@ -9245,7 +9251,11 @@ async function handleSave(db, params) {
     }
   }
   const effectiveProjectId = global ? null : projectId || null;
-  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  const identity = params.user !== void 0 || params.environment !== void 0 ? { user: params.user ?? null, environment: params.environment ?? null } : void 0;
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId, {
+    transcriptContent: params.transcriptContent,
+    identity
+  });
   return {
     success: true,
     archived: result.archived,
@@ -10154,7 +10164,10 @@ function enqueue(job) {
 async function runArchive(body) {
   const db = await getDb();
   const projectId = body.projectId ?? null;
-  const result = await archiveSession(db, body.transcriptPath, projectId);
+  const result = await archiveSession(db, body.transcriptPath, projectId, {
+    transcriptContent: body.transcriptContent,
+    identity: body.identity
+  });
   if (body.markAutoSave) {
     markAutoSaved(body.transcriptPath, body.contextPercent ?? 0, result.archived);
   }
