@@ -15,9 +15,12 @@ Branch: `claude/plugin-remote-server-adapter-25px4k`.
   identity})`; the MCP proxy uploads transcript content and injects client identity so
   `cortex_save`/`cortex_archive` work over remote with correct attribution. All content-based ops
   work over remote today.
+- ✅ **Hook paths over remote** — auto-recall, statusline/stats, session-start, session-end,
+  pre-compact, and post-tool autosave route via `isSharedBackendEnabled()`; `requestDaemonArchive`
+  uploads content + client identity in remote mode. No local-DB write fallback in remote mode.
 - ⬜ **D. Sync changelog identity fields** — carry `user`/`environment` across devices (follow-up).
-- ⬜ **Hook paths over remote** — auto-recall/statusline/auto-archive hooks still gate on
-  `daemon.enabled`; routing them through remote is a follow-up (MCP tool surface already works).
+- ⬜ **`/recall` category scope over remote** — auto-recall uses project scope over remote; passing
+  the full category `auto` scope + client identity to the `/recall` endpoint is a refinement.
 
 ---
 

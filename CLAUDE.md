@@ -346,9 +346,14 @@ server can't read the client's disk). The server parses the uploaded content
 `cortex_remember`, `cortex_recall`, restore, stats, and management tools all
 work fully over remote.
 
-Known limitation: automation hooks (auto-recall, statusline, auto-archive)
-still gate on `daemon.enabled`; routing them through remote is a follow-up
-(the MCP tool surface already works over remote).
+**Automation hooks over remote:** the auto-recall, statusline/stats,
+session-start, session-end, pre-compact, and post-tool autosave hooks route
+to the shared backend via `isSharedBackendEnabled()` (daemon OR remote).
+`requestDaemonArchive` uploads transcript content + client identity in remote
+mode (mirroring the MCP proxy). In remote mode there is NO local-DB fallback
+for writes when the server is unreachable — the hook fails quietly rather than
+diverging the shared brain. Remote-side scheduled `backup`/`sync` remain the
+server's responsibility, not the client's.
 
 ### Category-Scoped Recall
 

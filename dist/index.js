@@ -6790,6 +6790,9 @@ function getRemoteToken() {
   const token = process.env.CORTEX_REMOTE_TOKEN;
   return token && token.trim() ? token.trim() : null;
 }
+function isSharedBackendEnabled() {
+  return loadConfig().daemon.enabled || isRemoteModeEnabled();
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -7426,8 +7429,19 @@ async function getDaemonStats(projectId, timeoutMs = 400) {
 }
 async function requestDaemonArchive(params) {
   const { timeoutMs = params.async ? 1500 : 55e3, ...body } = params;
+  const outbound = { ...body };
+  if (isRemoteModeEnabled()) {
+    try {
+      if (fs3.existsSync(body.transcriptPath)) {
+        outbound.transcriptContent = fs3.readFileSync(body.transcriptPath, "utf8");
+      }
+    } catch {
+    }
+    const config = loadConfig();
+    outbound.identity = { user: resolveUser(config), environment: resolveEnvironment(config) };
+  }
   try {
-    const result = await daemonFetch("/archive", { method: "POST", body, timeoutMs });
+    const result = await daemonFetch("/archive", { method: "POST", body: outbound, timeoutMs });
     return result;
   } catch {
     return null;
@@ -10170,7 +10184,7 @@ function executeChainedStatusline() {
 async function handleStatusline() {
   const stdin = await readStdin();
   const config = loadConfig();
-  const daemonMode = config.daemon.enabled;
+  const daemonMode = isSharedBackendEnabled();
   let remoteStats = null;
   let db = null;
   if (daemonMode) {
@@ -10353,7 +10367,7 @@ async function handleSessionStart() {
     saveCurrentSession(stdin.transcript_path, projectId);
   }
   startSession(projectId);
-  if (config.daemon.enabled) {
+  if (isSharedBackendEnabled()) {
     const handled = await sessionStartViaDaemon(config, projectId);
     if (handled)
       return;
@@ -10437,7 +10451,7 @@ async function handleSessionEnd() {
   }
   const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
   console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Saving session before exit...`);
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
+  if (isSharedBackendEnabled() && await ensureDaemon(5e3)) {
     const result2 = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
       projectId,
@@ -10447,6 +10461,10 @@ async function handleSessionEnd() {
       if (result2.archived > 0) {
         console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.green}Saved ${result2.archived} memories`);
       }
+      return;
+    }
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not saved`);
       return;
     }
   }
@@ -10464,7 +10482,7 @@ async function handlePostTool() {
   if (config.autosave.contextStep.enabled) {
     const currentPercent = getContextPercent(stdin);
     if (shouldAutoSave(currentPercent, stdin.transcript_path)) {
-      if (config.daemon.enabled) {
+      if (isSharedBackendEnabled()) {
         setSavingState(true, stdin.transcript_path);
         const queued = await requestDaemonArchive({
           transcriptPath: stdin.transcript_path,
@@ -10545,7 +10563,7 @@ async function handlePreCompact() {
     return;
   }
   const projectId = config.archive.projectScope && stdin.cwd ? getProjectId(stdin.cwd) : null;
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
+  if (isSharedBackendEnabled() && await ensureDaemon(5e3)) {
     console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-archiving before compact...`);
     const result2 = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
@@ -10575,6 +10593,10 @@ async function handlePreCompact() {
         }
         console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
       }
+      return;
+    }
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not archived`);
       return;
     }
   }
@@ -10686,8 +10708,8 @@ async function handleAutoRecall() {
     minScore: config.recall.minScore
   });
   if (results === null) {
-    if (config.daemon.enabled) {
-      debugLog("handleAutoRecall", "Daemon unreachable or missing /recall; skipping (daemon mode)");
+    if (config.daemon.enabled || isRemoteModeEnabled()) {
+      debugLog("handleAutoRecall", "Shared backend unreachable or missing /recall; skipping");
       return;
     }
     try {
@@ -11276,6 +11298,7 @@ export {
   isPromptEligible,
   isRemoteModeEnabled,
   isServerMode,
+  isSharedBackendEnabled,
   isSyncDue,
   loadAutoSaveState,
   loadBackupState,
@@ -11287,6 +11310,7 @@ export {
   parseTranscriptContent,
   readStdinWithResult,
   recordInjection,
+  requestDaemonArchive,
   resetAutoSaveState,
   resolveEnvironment,
   resolveIdentity,
