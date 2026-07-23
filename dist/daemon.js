@@ -599,15 +599,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs9 = __require("node:fs");
+          var fs10 = __require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs9.readFileSync(a);
+            return fs10.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs9.readFileSync(a, void 0);
+            return fs10.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -915,7 +915,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs9.readSync(d, b, 0, 256);
+                  c = fs10.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2408,7 +2408,7 @@ var require_sql_wasm = __commonJS({
 
 // src/daemon.ts
 import * as http from "http";
-import * as fs8 from "fs";
+import * as fs9 from "fs";
 import { spawn } from "child_process";
 
 // src/database.ts
@@ -6520,6 +6520,14 @@ var RecallConfigSchema = external_exports.object({
   tokenBudget: external_exports.number().min(50).max(1e4),
   minPromptLength: external_exports.number().min(0).max(1e3)
 });
+var IdentityConfigSchema = external_exports.object({
+  user: external_exports.string().nullable(),
+  environment: external_exports.string().nullable()
+});
+var RemoteConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  url: external_exports.string().nullable()
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6530,7 +6538,10 @@ var ConfigSchema = external_exports.object({
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
   sync: SyncConfigSchema,
-  recall: RecallConfigSchema
+  recall: RecallConfigSchema,
+  identity: IdentityConfigSchema,
+  remote: RemoteConfigSchema,
+  project: external_exports.string().nullable()
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6590,6 +6601,14 @@ var DEFAULT_RECALL_CONFIG = {
   tokenBudget: 500,
   minPromptLength: 12
 };
+var DEFAULT_IDENTITY_CONFIG = {
+  user: null,
+  environment: null
+};
+var DEFAULT_REMOTE_CONFIG = {
+  enabled: false,
+  url: null
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6600,7 +6619,10 @@ var DEFAULT_CONFIG = {
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
   sync: DEFAULT_SYNC_CONFIG,
-  recall: DEFAULT_RECALL_CONFIG
+  recall: DEFAULT_RECALL_CONFIG,
+  identity: DEFAULT_IDENTITY_CONFIG,
+  remote: DEFAULT_REMOTE_CONFIG,
+  project: null
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -6611,6 +6633,27 @@ function getDataDir() {
 }
 function getConfigPath() {
   return path.join(getDataDir(), "config.json");
+}
+function getProjectConfigDir(cwd) {
+  if (!cwd)
+    return null;
+  const globalDir = path.resolve(getDataDir());
+  let dir = path.resolve(cwd);
+  while (true) {
+    const candidate = path.join(dir, ".cortex");
+    if (path.resolve(candidate) !== globalDir && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return null;
+}
+function getProjectConfigPath(cwd) {
+  const dir = getProjectConfigDir(cwd);
+  return dir ? path.join(dir, "config.json") : null;
 }
 function getDatabasePath() {
   return path.join(getDataDir(), "memory.db");
@@ -6653,26 +6696,40 @@ function deepMerge(target, source) {
   }
   return result;
 }
-function loadConfig() {
-  const configPath = getConfigPath();
-  if (!fs.existsSync(configPath)) {
-    return DEFAULT_CONFIG;
-  }
+function readConfigLayer(filePath) {
+  if (!filePath || !fs.existsSync(filePath))
+    return {};
   try {
-    const content = fs.readFileSync(configPath, "utf8");
-    const loaded = JSON.parse(content);
-    const merged = deepMerge(DEFAULT_CONFIG, loaded);
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function applyEnvOverrides(config) {
+  const remoteUrl = process.env.CORTEX_REMOTE_URL;
+  if (remoteUrl && remoteUrl.trim()) {
+    config = deepMerge(config, { remote: { enabled: true, url: remoteUrl.trim() } });
+  }
+  return config;
+}
+function loadConfig(cwd) {
+  try {
+    const globalLayer = readConfigLayer(getConfigPath());
+    const projectLayer = cwd ? readConfigLayer(getProjectConfigPath(cwd)) : {};
+    let merged = deepMerge(DEFAULT_CONFIG, globalLayer);
+    merged = deepMerge(merged, projectLayer);
+    merged = applyEnvOverrides(merged);
     const result = ConfigSchema.safeParse(merged);
     if (!result.success) {
       const errors = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
       console.error(`Config validation errors:
   ${errors.join("\n  ")}`);
       console.error("Using default configuration");
-      return DEFAULT_CONFIG;
+      return applyEnvOverrides(DEFAULT_CONFIG);
     }
     return result.data;
   } catch {
-    return DEFAULT_CONFIG;
+    return applyEnvOverrides(DEFAULT_CONFIG);
   }
 }
 var activeConfigTempPath = null;
@@ -7150,6 +7207,12 @@ function createSchema(db, options = {}) {
     db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
   } catch {
   }
+  for (const col of ["user TEXT", "environment TEXT", "category TEXT DEFAULT 'project'"]) {
+    try {
+      db.run(`ALTER TABLE memories ADD COLUMN ${col}`);
+    } catch {
+    }
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS sync_tombstones (
       content_hash TEXT PRIMARY KEY,
@@ -7160,6 +7223,9 @@ function createSchema(db, options = {}) {
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_environment ON memories(environment)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)`);
   db.run(`
     CREATE TABLE IF NOT EXISTS session_turns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7281,15 +7347,18 @@ function insertMemory(db, memory) {
     return { id: existing[0].values[0][0], isDuplicate: true };
   }
   db.run(
-    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp, user, environment, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       memory.content,
       hash,
       embeddingToBuffer(memory.embedding),
       memory.projectId,
       memory.sourceSession,
-      memory.timestamp.toISOString()
+      memory.timestamp.toISOString(),
+      memory.user ?? null,
+      memory.environment ?? null,
+      memory.category ?? "project"
     ]
   );
   const result = db.exec(`SELECT last_insert_rowid()`);
@@ -7353,7 +7422,7 @@ function deleteMemory(db, id) {
     throw error;
   }
 }
-function storeManualMemory(db, content, embedding, projectId, context) {
+function storeManualMemory(db, content, embedding, projectId, context, identity) {
   const fullContent = context ? `${content}
 
 [Context: ${context}]` : content;
@@ -7363,7 +7432,10 @@ function storeManualMemory(db, content, embedding, projectId, context) {
     embedding,
     projectId,
     sourceSession: sessionId,
-    timestamp: /* @__PURE__ */ new Date()
+    timestamp: /* @__PURE__ */ new Date(),
+    user: identity?.user ?? null,
+    environment: identity?.environment ?? null,
+    category: identity?.category ?? "project"
   });
 }
 function updateMemory(db, id, newContent, newEmbedding) {
@@ -7805,7 +7877,7 @@ async function embedQuery(text) {
   return new Float32Array(output.data);
 }
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function embedSingleWithRetry(pipe, text, maxRetries = 3, baseDelayMs = 100) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -7989,8 +8061,84 @@ function applyRecencyDecay(results) {
 }
 
 // src/archive.ts
-import * as fs3 from "fs";
+import * as fs4 from "fs";
 import * as readline from "readline";
+
+// src/identity.ts
+import * as fs3 from "fs";
+import * as os3 from "os";
+function sanitizeLabel(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+function osUsername() {
+  try {
+    const name = os3.userInfo().username;
+    if (name)
+      return sanitizeLabel(name);
+  } catch {
+  }
+  const envName = process.env.USER || process.env.USERNAME || process.env.LOGNAME;
+  return envName ? sanitizeLabel(envName) : "unknown";
+}
+function resolveUser(config) {
+  const fromEnv = process.env.CORTEX_USER;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.user;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return osUsername();
+}
+function isClaudeWeb() {
+  if (process.env.CLAUDE_CODE_WEB || process.env.CLAUDE_CODE_REMOTE)
+    return true;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === "web")
+    return true;
+  try {
+    if (fs3.existsSync("/root/.ccr/ca-bundle.crt"))
+      return true;
+  } catch {
+  }
+  return false;
+}
+function isWSL() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+    return true;
+  try {
+    const version = fs3.readFileSync("/proc/version", "utf8");
+    return /microsoft/i.test(version);
+  } catch {
+    return false;
+  }
+}
+function platformLabel() {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    default:
+      return process.platform;
+  }
+}
+function detectEnvironment(user) {
+  if (isClaudeWeb())
+    return "claude-web";
+  if (isWSL())
+    return sanitizeLabel(`${user}-wsl`);
+  return sanitizeLabel(`${user}-${platformLabel()}`);
+}
+function resolveEnvironment(config) {
+  const fromEnv = process.env.CORTEX_ENVIRONMENT;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.environment;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return detectEnvironment(resolveUser(config));
+}
 
 // src/logger.ts
 var globalVerbose = false;
@@ -8098,10 +8246,10 @@ async function parseTranscript(transcriptPath, startLine = 0) {
       parseErrors: 0
     }
   };
-  if (!fs3.existsSync(transcriptPath)) {
+  if (!fs4.existsSync(transcriptPath)) {
     return result;
   }
-  const fileStream = fs3.createReadStream(transcriptPath);
+  const fileStream = fs4.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
@@ -8408,6 +8556,11 @@ async function appendSessionTurns(db, newMessages, projectId, sessionId) {
 async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
+  const identity = {
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    category: "project"
+  };
   const result = {
     archived: 0,
     skipped: 0,
@@ -8479,7 +8632,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
       embedding,
       projectId,
       sourceSession: sessionId,
-      timestamp
+      timestamp,
+      ...identity
     });
     if (isDuplicate) {
       result.duplicates++;
@@ -8636,16 +8790,16 @@ function formatTimeAgo(date) {
 }
 
 // src/analytics.ts
-import * as fs4 from "fs";
+import * as fs5 from "fs";
 var ANALYTICS_VERSION = 1;
 var MAX_SESSIONS_TO_KEEP = 100;
 function getAnalytics() {
   const analyticsPath = getAnalyticsPath();
-  if (!fs4.existsSync(analyticsPath)) {
+  if (!fs5.existsSync(analyticsPath)) {
     return createEmptyAnalytics();
   }
   try {
-    const content = fs4.readFileSync(analyticsPath, "utf8");
+    const content = fs5.readFileSync(analyticsPath, "utf8");
     const data = JSON.parse(content);
     if (data.version !== ANALYTICS_VERSION) {
       return migrateAnalytics(data);
@@ -8661,7 +8815,7 @@ function saveAnalytics(data) {
   if (data.sessions.length > MAX_SESSIONS_TO_KEEP) {
     data.sessions = data.sessions.slice(-MAX_SESSIONS_TO_KEEP);
   }
-  fs4.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
+  fs5.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
 }
 function createEmptyAnalytics() {
   return {
@@ -8728,6 +8882,14 @@ function getAnalyticsSummary() {
 // src/version.ts
 var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
 
+// src/types.ts
+var MEMORY_CATEGORIES = [
+  "global",
+  "user",
+  "environment",
+  "project"
+];
+
 // src/tools.ts
 var TOOLS = [
   {
@@ -8773,6 +8935,11 @@ var TOOLS = [
         projectId: {
           type: "string",
           description: "Project ID to associate with this memory"
+        },
+        category: {
+          type: "string",
+          enum: ["global", "user", "environment", "project"],
+          description: "Generalization axis of this memory (default 'project'). 'project' = specific to this codebase; 'environment' = tied to this machine/context, useful across projects; 'user' = about the user, across everything; 'global' = universally true. Determines how future recall scopes this memory."
         }
       },
       required: ["content"]
@@ -8963,7 +9130,7 @@ async function handleRecall(db, params) {
   };
 }
 async function handleRemember(db, params) {
-  const { content, context, projectId } = params;
+  const { content, context, projectId, category } = params;
   if (!content || content.trim().length === 0) {
     return {
       success: false,
@@ -8972,7 +9139,13 @@ async function handleRemember(db, params) {
   }
   const textToEmbed = context ? `${content} ${context}` : content;
   const embedding = await embedQuery(textToEmbed);
-  const result = storeManualMemory(db, content, embedding, projectId || null, context);
+  const config = loadConfig();
+  const identity = {
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    category: category && MEMORY_CATEGORIES.includes(category) ? category : "project"
+  };
+  const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
   if (result.isDuplicate) {
     return {
       success: true,
@@ -9353,7 +9526,7 @@ async function handleMcpRequest(db, request) {
 }
 
 // src/daemon-client.ts
-import * as fs5 from "fs";
+import * as fs6 from "fs";
 function getDaemonBaseUrl() {
   return `http://127.0.0.1:${getDaemonPort()}`;
 }
@@ -9396,8 +9569,8 @@ async function stopDaemon() {
   } catch {
     try {
       const infoPath = getDaemonInfoPath();
-      if (fs5.existsSync(infoPath)) {
-        const info = JSON.parse(fs5.readFileSync(infoPath, "utf8"));
+      if (fs6.existsSync(infoPath)) {
+        const info = JSON.parse(fs6.readFileSync(infoPath, "utf8"));
         if (info.pid) {
           process.kill(info.pid, "SIGTERM");
           requested = true;
@@ -9410,7 +9583,7 @@ async function stopDaemon() {
 }
 
 // src/backup.ts
-import * as fs6 from "fs";
+import * as fs7 from "fs";
 import * as path3 from "path";
 import * as zlib from "zlib";
 import { pipeline } from "stream/promises";
@@ -9431,7 +9604,7 @@ function getBackupStatePath() {
 }
 function loadBackupState() {
   try {
-    const raw = fs6.readFileSync(getBackupStatePath(), "utf8");
+    const raw = fs7.readFileSync(getBackupStatePath(), "utf8");
     return { ...EMPTY_STATE, ...JSON.parse(raw) };
   } catch {
     return { ...EMPTY_STATE };
@@ -9439,7 +9612,7 @@ function loadBackupState() {
 }
 function saveBackupState(state) {
   try {
-    fs6.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
+    fs7.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
   } catch {
   }
 }
@@ -9453,12 +9626,12 @@ function isBackupDue(config) {
   return elapsed >= config.intervalMinutes * 60 * 1e3;
 }
 function rclone(args, timeoutMs = RCLONE_TIMEOUT_MS) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     execFile("rclone", args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(`rclone ${args[0]} failed: ${stderr?.trim() || error.message}`));
       } else {
-        resolve(stdout);
+        resolve2(stdout);
       }
     });
   });
@@ -9473,7 +9646,7 @@ async function rcloneAvailable() {
 }
 function snapshotTmpDir() {
   const dir = path3.join(getDataDir(), "backup-tmp");
-  fs6.mkdirSync(dir, { recursive: true });
+  fs7.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function snapshotName() {
@@ -9482,36 +9655,36 @@ function snapshotName() {
 }
 function createSnapshotFromDb(db, kind, outPath) {
   if (kind === "native") {
-    if (fs6.existsSync(outPath))
-      fs6.unlinkSync(outPath);
+    if (fs7.existsSync(outPath))
+      fs7.unlinkSync(outPath);
     db.run("VACUUM INTO ?", [outPath]);
   } else {
-    fs6.writeFileSync(outPath, db.export());
+    fs7.writeFileSync(outPath, db.export());
   }
 }
 async function createSnapshotFromFile(outPath) {
   const dbPath = getDatabasePath();
-  if (!fs6.existsSync(dbPath)) {
+  if (!fs7.existsSync(dbPath)) {
     throw new Error(`Database not found at ${dbPath}`);
   }
   const native = await tryOpenNative(dbPath);
   if (native) {
     try {
-      if (fs6.existsSync(outPath))
-        fs6.unlinkSync(outPath);
+      if (fs7.existsSync(outPath))
+        fs7.unlinkSync(outPath);
       native.run("VACUUM INTO ?", [outPath]);
       return;
     } finally {
       native.close();
     }
   }
-  fs6.copyFileSync(dbPath, outPath);
+  fs7.copyFileSync(dbPath, outPath);
 }
 async function gzipFile(srcPath, destPath) {
   await pipeline(
-    fs6.createReadStream(srcPath),
+    fs7.createReadStream(srcPath),
     zlib.createGzip({ level: 6 }),
-    fs6.createWriteStream(destPath)
+    fs7.createWriteStream(destPath)
   );
 }
 async function rotateRemote(remote, keep) {
@@ -9555,7 +9728,7 @@ async function runBackup(source = {}) {
       await createSnapshotFromFile(rawPath);
     }
     await gzipFile(rawPath, gzPath);
-    const sizeBytes = fs6.statSync(gzPath).size;
+    const sizeBytes = fs7.statSync(gzPath).size;
     await rclone(["copyto", gzPath, `${config.remote}/${name}`]);
     const rotatedOut = await rotateRemote(config.remote, config.keep);
     const result = {
@@ -9584,7 +9757,7 @@ async function runBackup(source = {}) {
   } finally {
     for (const p of [rawPath, gzPath]) {
       try {
-        fs6.unlinkSync(p);
+        fs7.unlinkSync(p);
       } catch {
       }
     }
@@ -9592,8 +9765,8 @@ async function runBackup(source = {}) {
 }
 
 // src/sync.ts
-import * as fs7 from "fs";
-import * as os3 from "os";
+import * as fs8 from "fs";
+import * as os4 from "os";
 import * as path4 from "path";
 import * as zlib2 from "zlib";
 import * as crypto3 from "crypto";
@@ -9615,7 +9788,7 @@ function getSyncStatePath() {
 }
 function loadSyncState() {
   try {
-    const raw = fs7.readFileSync(getSyncStatePath(), "utf8");
+    const raw = fs8.readFileSync(getSyncStatePath(), "utf8");
     const parsed = JSON.parse(raw);
     return { ...EMPTY_SYNC_STATE, ...parsed, peers: { ...parsed.peers ?? {} } };
   } catch {
@@ -9623,12 +9796,12 @@ function loadSyncState() {
   }
 }
 function saveSyncState(state) {
-  fs7.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
+  fs8.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
 }
 function ensureDeviceId(state) {
   if (state.deviceId)
     return state.deviceId;
-  const host = os3.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
+  const host = os4.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
   state.deviceId = `${host}-${crypto3.randomBytes(3).toString("hex")}`;
   saveSyncState(state);
   return state.deviceId;
@@ -9643,7 +9816,7 @@ function isSyncDue(config) {
 }
 function tmpDir() {
   const dir = path4.join(getDataDir(), "sync-tmp");
-  fs7.mkdirSync(dir, { recursive: true });
+  fs8.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function seqName(seq) {
@@ -9714,11 +9887,11 @@ async function pushChanges(db, state, config, remote) {
     const localPath = path4.join(tmpDir(), name);
     try {
       const jsonl = chunk.map((e) => JSON.stringify(e.line)).join("\n") + "\n";
-      fs7.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
+      fs8.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
       await rclone(["copyto", localPath, `${remote}/${deviceId}/${name}`]);
     } finally {
       try {
-        fs7.unlinkSync(localPath);
+        fs8.unlinkSync(localPath);
       } catch {
       }
     }
@@ -9805,11 +9978,11 @@ async function pullChanges(db, state, remote) {
         let lines;
         try {
           await rclone(["copyto", `${remote}/${peer}/${file.name}`, localPath]);
-          const jsonl = zlib2.gunzipSync(fs7.readFileSync(localPath)).toString("utf8");
+          const jsonl = zlib2.gunzipSync(fs8.readFileSync(localPath)).toString("utf8");
           lines = jsonl.split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
         } finally {
           try {
-            fs7.unlinkSync(localPath);
+            fs8.unlinkSync(localPath);
           } catch {
           }
         }
@@ -9890,7 +10063,7 @@ function enqueueArchive(body) {
   return enqueue(() => runArchive(body));
 }
 function readBody(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     let size = 0;
     let rejected = false;
     const chunks = [];
@@ -9908,7 +10081,7 @@ function readBody(req) {
     });
     req.on("end", () => {
       if (!rejected)
-        resolve(Buffer.concat(chunks).toString("utf8"));
+        resolve2(Buffer.concat(chunks).toString("utf8"));
     });
     req.on("error", (error) => {
       if (!rejected) {
@@ -10094,7 +10267,7 @@ async function handleRequest(req, res) {
 }
 function writeDaemonInfo(port) {
   try {
-    fs8.writeFileSync(
+    fs9.writeFileSync(
       getDaemonInfoPath(),
       JSON.stringify({ pid: process.pid, port, version: VERSION, startedAt: new Date(startedAt).toISOString() }, null, 2)
     );
@@ -10104,10 +10277,10 @@ function writeDaemonInfo(port) {
 function removeDaemonInfo() {
   try {
     const infoPath = getDaemonInfoPath();
-    if (fs8.existsSync(infoPath)) {
-      const info = JSON.parse(fs8.readFileSync(infoPath, "utf8"));
+    if (fs9.existsSync(infoPath)) {
+      const info = JSON.parse(fs9.readFileSync(infoPath, "utf8"));
       if (info.pid === process.pid) {
-        fs8.unlinkSync(infoPath);
+        fs9.unlinkSync(infoPath);
       }
     }
   } catch {
@@ -10147,7 +10320,7 @@ function spawnShutdownBackup() {
     if (!isBackupDue(loadConfig().backup))
       return;
     const indexPath = decodeURIComponent(new URL("./index.js", import.meta.url).pathname);
-    if (!fs8.existsSync(indexPath))
+    if (!fs9.existsSync(indexPath))
       return;
     const child = spawn(process.execPath, [indexPath, "backup", "--if-due", "--direct"], {
       detached: true,

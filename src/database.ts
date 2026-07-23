@@ -10,7 +10,7 @@ import initSqlJs, { Database as SqlJsDatabase, SqlValue } from 'sql.js';
 import { getDatabasePath, ensureDataDir, getBackupsDir, ensureBackupsDir, cleanupActiveConfigTempFile } from './config.js';
 import * as path from 'path';
 import { tryOpenNative, NativeStorage, type Storage, type StorageKind } from './storage.js';
-import type { Memory, MemoryInput, DbStats, SessionTurn, TurnInput } from './types.js';
+import type { Memory, MemoryInput, DbStats, SessionTurn, TurnInput, MemoryCategory } from './types.js';
 import * as crypto from 'crypto';
 
 // ============================================================================
@@ -484,6 +484,18 @@ function createSchema(db: Storage, options: { includeFts?: boolean } = {}): void
     // Column already exists
   }
 
+  // Migration for the shared-brain identity columns. Additive; old rows keep
+  // NULL (treated as legacy/unknown). `category` declares the generalization
+  // axis that scopes recall (global | user | environment | project); a NULL
+  // category behaves as 'project'. See src/identity.ts and src/search.ts.
+  for (const col of ['user TEXT', 'environment TEXT', "category TEXT DEFAULT 'project'"]) {
+    try {
+      db.run(`ALTER TABLE memories ADD COLUMN ${col}`);
+    } catch {
+      // Column already exists
+    }
+  }
+
   // Sync tombstones: deletions that must propagate to (and suppress
   // re-import from) other devices. origin_device NULL = deleted locally.
   db.run(`
@@ -498,6 +510,9 @@ function createSchema(db: Storage, options: { includeFts?: boolean } = {}): void
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_environment ON memories(environment)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)`);
 
   // Session turns table (for precise restoration after /clear)
   db.run(`
@@ -682,10 +697,11 @@ export function insertMemory(
     return { id: existing[0].values[0][0] as number, isDuplicate: true };
   }
 
-  // Insert new memory
+  // Insert new memory. Identity columns are additive: callers that don't
+  // supply them get NULL user/environment and category 'project'.
   db.run(
-    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp, user, environment, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       memory.content,
       hash,
@@ -693,6 +709,9 @@ export function insertMemory(
       memory.projectId,
       memory.sourceSession,
       memory.timestamp.toISOString(),
+      memory.user ?? null,
+      memory.environment ?? null,
+      memory.category ?? 'project',
     ]
   );
 
@@ -788,7 +807,8 @@ export function storeManualMemory(
   content: string,
   embedding: Float32Array,
   projectId: string | null,
-  context?: string
+  context?: string,
+  identity?: { user?: string | null; environment?: string | null; category?: MemoryCategory | null }
 ): { id: number; isDuplicate: boolean } {
   // Combine content with context if provided
   const fullContent = context
@@ -804,6 +824,9 @@ export function storeManualMemory(
     projectId,
     sourceSession: sessionId,
     timestamp: new Date(),
+    user: identity?.user ?? null,
+    environment: identity?.environment ?? null,
+    category: identity?.category ?? 'project',
   });
 }
 
