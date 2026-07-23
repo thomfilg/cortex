@@ -58,6 +58,11 @@ export interface Memory {
   projectId: string | null;
   sourceSession: string;
   timestamp: Date;
+  /** Identity of the authoring session (shared-brain attribution). */
+  user?: string | null;
+  environment?: string | null;
+  /** Generalization axis that scopes recall; defaults to 'project'. */
+  category?: MemoryCategory | null;
 }
 
 /**
@@ -221,6 +226,51 @@ export interface RecallConfig {
   minPromptLength: number;
 }
 
+/**
+ * Identity of the session writing a memory. Populated into the memories
+ * table so a shared brain (see RemoteConfig) can attribute and scope recall.
+ * Both fields are usually null in config and resolved dynamically at runtime
+ * (env var > this config > auto-detect). See src/identity.ts.
+ */
+export interface IdentityConfig {
+  /** Override the resolved user; null = env var or OS username */
+  user: string | null;
+  /** Override the resolved environment label; null = auto-detect */
+  environment: string | null;
+}
+
+/**
+ * Opt-in remote shared-brain backend. When enabled, the plugin talks to a
+ * remote Cortex daemon over HTTP instead of (or in addition to) a local DB,
+ * so every session across machines shares one memory store.
+ *
+ * The auth token is NEVER stored here - it is read from the
+ * CORTEX_REMOTE_TOKEN environment variable at request time. This keeps a
+ * committed project-level .cortex/config.json free of secrets.
+ */
+export interface RemoteConfig {
+  enabled: boolean;
+  /** Base URL of the shared brain, e.g. "https://cortex.myteam.dev". null = unconfigured */
+  url: string | null;
+}
+
+/**
+ * The generalization axis of a memory - "where is this knowledge true?".
+ * Drives automatic recall scoping (see src/search.ts):
+ * - global: always eligible
+ * - user: scoped to the same user, across machines/projects
+ * - environment: scoped to the same machine/context, across projects
+ * - project: scoped to the same project (default)
+ */
+export type MemoryCategory = 'global' | 'user' | 'environment' | 'project';
+
+export const MEMORY_CATEGORIES: readonly MemoryCategory[] = [
+  'global',
+  'user',
+  'environment',
+  'project',
+] as const;
+
 export interface Config {
   statusline: StatuslineConfig;
   archive: ArchiveConfig;
@@ -232,6 +282,10 @@ export interface Config {
   backup: BackupConfig;
   sync: SyncConfig;
   recall: RecallConfig;
+  identity: IdentityConfig;
+  remote: RemoteConfig;
+  /** Stable project name; set in project-root .cortex/config.json. null = derive from cwd */
+  project: string | null;
 }
 
 // ============================================================================

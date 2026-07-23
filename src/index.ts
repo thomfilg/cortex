@@ -4,11 +4,12 @@
  */
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
-import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, type ConfigPreset } from './config.js';
+import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, getProjectConfigDir, getProjectConfigPath, type ConfigPreset } from './config.js';
+import { resolveUser, resolveProject, resolveEnvironment, resolveIdentity, sanitizeLabel } from './identity.js';
 import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, type DaemonStats } from './daemon-client.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
-import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory } from './database.js';
+import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory, getMemory } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, vectorSearch, formatSearchResults } from './search.js';
 import { isPromptEligible, selectForInjection, formatInjection, loadRecallState, getInjectedIds, recordInjection, getRecallStatePath } from './recall-auto.js';
@@ -1702,7 +1703,16 @@ export {
   getRecallStatePath,
   vectorSearch,
   embedQuery,
-  loadConfig
+  loadConfig,
+  // Export identity + project-config helpers for testing
+  resolveUser,
+  resolveProject,
+  resolveEnvironment,
+  resolveIdentity,
+  sanitizeLabel,
+  getProjectConfigDir,
+  getProjectConfigPath,
+  getMemory
 };
 
 // Run main only when executed directly (not when imported)

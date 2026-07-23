@@ -10,6 +10,7 @@ import type { Storage } from './storage.js';
 import { insertMemory, contentExists, saveDb, insertTurn, getRecentTurns, getRecentMemories, upsertSessionSummary, getSessionProgress, updateSessionProgress, clearOldTurns } from './database.js';
 import { embedBatch } from './embeddings.js';
 import { loadConfig } from './config.js';
+import { resolveUser, resolveEnvironment } from './identity.js';
 import { debug } from './logger.js';
 import type { ArchiveResult, TranscriptMessage, ParseResult } from './types.js';
 
@@ -577,6 +578,15 @@ export async function archiveSession(
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
 
+  // Shared-brain identity stamped onto every archived fragment. Archived
+  // session content is project work, so category defaults to 'project'; the
+  // project itself is carried by projectId (the project_id column).
+  const identity = {
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    category: 'project' as const,
+  };
+
   const result: ArchiveResult = {
     archived: 0,
     skipped: 0,
@@ -689,6 +699,7 @@ export async function archiveSession(
       projectId,
       sourceSession: sessionId,
       timestamp,
+      ...identity,
     });
 
     if (isDuplicate) {
@@ -753,12 +764,16 @@ export async function archiveContent(
   const embeddings = await embedBatch([content]);
   const embedding = embeddings[0];
 
+  const config = loadConfig();
   const { isDuplicate } = insertMemory(db, {
     content,
     embedding,
     projectId,
     sourceSession: 'manual',
     timestamp: new Date(),
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    category: 'project',
   });
 
   if (!isDuplicate) {

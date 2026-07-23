@@ -10,8 +10,11 @@ import { hybridSearch } from './search.js';
 import { archiveSession } from './archive.js';
 import { embedQuery } from './embeddings.js';
 import { getAnalytics, getAnalyticsSummary, recordRemember, recordRecall } from './analytics.js';
+import { resolveUser, resolveEnvironment } from './identity.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
+import { MEMORY_CATEGORIES } from './types.js';
+import type { MemoryCategory } from './types.js';
 
 // ============================================================================
 // MCP Protocol Types
@@ -93,6 +96,11 @@ export const TOOLS: Tool[] = [
         projectId: {
           type: 'string',
           description: 'Project ID to associate with this memory',
+        },
+        category: {
+          type: 'string',
+          enum: ['global', 'user', 'environment', 'project'],
+          description: "Generalization axis of this memory (default 'project'). 'project' = specific to this codebase; 'environment' = tied to this machine/context, useful across projects; 'user' = about the user, across everything; 'global' = universally true. Determines how future recall scopes this memory.",
         },
       },
       required: ['content'],
@@ -297,9 +305,9 @@ async function handleRecall(
 
 async function handleRemember(
   db: Storage,
-  params: { content: string; context?: string; projectId?: string }
+  params: { content: string; context?: string; projectId?: string; category?: MemoryCategory }
 ): Promise<unknown> {
-  const { content, context, projectId } = params;
+  const { content, context, projectId, category } = params;
 
   if (!content || content.trim().length === 0) {
     return {
@@ -312,8 +320,17 @@ async function handleRemember(
   const textToEmbed = context ? `${content} ${context}` : content;
   const embedding = await embedQuery(textToEmbed);
 
+  // Resolve shared-brain identity (env > config > auto). project is the
+  // supplied projectId (stored in the project_id column).
+  const config = loadConfig();
+  const identity = {
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    category: (category && MEMORY_CATEGORIES.includes(category) ? category : 'project') as MemoryCategory,
+  };
+
   // Store the memory
-  const result = storeManualMemory(db, content, embedding, projectId || null, context);
+  const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
 
   if (result.isDuplicate) {
     return {
