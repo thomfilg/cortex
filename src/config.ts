@@ -320,6 +320,40 @@ export function isDaemonModeEnabled(): boolean {
   return loadConfig().daemon.enabled;
 }
 
+// ============================================================================
+// Remote shared-brain resolution
+// ============================================================================
+
+/**
+ * Remote (shared-brain) mode is enabled when a URL is configured and the
+ * feature is turned on. Enabling via CORTEX_REMOTE_URL (which also flips
+ * `enabled` on, see applyEnvOverrides) is the recommended path since the
+ * companion token must come from the environment anyway.
+ */
+export function isRemoteModeEnabled(): boolean {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+
+/**
+ * Normalized remote base URL (no trailing slash), or null if remote mode is
+ * off / unconfigured.
+ */
+export function getRemoteUrl(): string | null {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim()) return null;
+  return remote.url.trim().replace(/\/+$/, '');
+}
+
+/**
+ * Bearer token for the remote brain. ALWAYS from the environment - never read
+ * from any config file - so committed configs stay secret-free.
+ */
+export function getRemoteToken(): string | null {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+
 /**
  * Ensure the data directory exists
  */

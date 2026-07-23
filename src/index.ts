@@ -4,9 +4,10 @@
  */
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
-import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, getProjectConfigDir, getProjectConfigPath, type ConfigPreset } from './config.js';
+import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, getProjectConfigDir, getProjectConfigPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken, type ConfigPreset } from './config.js';
 import { resolveUser, resolveProject, resolveEnvironment, resolveIdentity, sanitizeLabel } from './identity.js';
-import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, type DaemonStats } from './daemon-client.js';
+import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, getDaemonBaseUrl, type DaemonStats } from './daemon-client.js';
+import { isServerMode, getBindHost, getServerToken, isAuthorized } from './daemon-auth.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
 import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, searchByKeyword, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory, getMemory, buildScopeClause } from './database.js';
@@ -1715,7 +1716,19 @@ export {
   getMemory,
   buildScopeClause,
   searchByKeyword,
-  searchByVector
+  searchByVector,
+  // Export remote-adapter helpers for testing
+  isRemoteModeEnabled,
+  getRemoteUrl,
+  getRemoteToken,
+  getDaemonBaseUrl,
+  isServerMode,
+  getBindHost,
+  getServerToken,
+  isAuthorized,
+  spawnDaemonDetached,
+  stopDaemon,
+  ensureDaemon
 };
 
 // Run main only when executed directly (not when imported)

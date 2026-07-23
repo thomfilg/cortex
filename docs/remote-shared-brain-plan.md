@@ -1,6 +1,24 @@
 # Cortex Remote Shared-Brain Adapter — Implementation Plan
 
-Status: **proposal** (no code changes yet). Branch: `claude/plugin-remote-server-adapter-25px4k`.
+Branch: `claude/plugin-remote-server-adapter-25px4k`.
+
+## Implementation status
+
+- ✅ **A. Identity module** (`src/identity.ts`) — user/project/environment resolution.
+- ✅ **B. Config layering** (`src/config.ts`) — project-root `.cortex/`, env overrides, remote helpers.
+- ✅ **C. Schema + migration** — `user`/`environment`/`category` columns, write stamping.
+- ✅ **C1. Category-aware recall** — `buildScopeClause`, `cortex_recall` `scope` param (default `auto`).
+- ✅ **E/F. Remote transport + auth** — `remote` mode in `daemon-client.ts`, server mode in
+  `daemon.ts` (`daemon-auth.ts`: bind `0.0.0.0` under `CORTEX_SERVER`, `CORTEX_SERVER_TOKEN`
+  bearer auth), proxy wiring in `mcp-server.ts`, local-ownership assumptions neutralized.
+- ⬜ **D. Sync changelog identity fields** — carry `user`/`environment` across devices (follow-up).
+- ⬜ **Remote transcript archive** — `/archive` reads the transcript server-side; remote needs a
+  content-upload endpoint so `cortex_save` works against a remote (follow-up). Content-based ops
+  (`cortex_remember`, `cortex_recall`, restore, stats, management) work over remote today.
+- ⬜ **Hook paths over remote** — auto-recall/statusline/auto-archive hooks still gate on
+  `daemon.enabled`; routing them through remote is a follow-up (MCP tool surface already works).
+
+---
 
 ## Goal
 
