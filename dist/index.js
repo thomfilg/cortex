@@ -599,15 +599,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs9 = __require("node:fs");
+          var fs10 = __require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs9.readFileSync(a);
+            return fs10.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs9.readFileSync(a, void 0);
+            return fs10.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -915,7 +915,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs9.readSync(d, b, 0, 256);
+                  c = fs10.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -6619,6 +6619,14 @@ var RecallConfigSchema = external_exports.object({
   tokenBudget: external_exports.number().min(50).max(1e4),
   minPromptLength: external_exports.number().min(0).max(1e3)
 });
+var IdentityConfigSchema = external_exports.object({
+  user: external_exports.string().nullable(),
+  environment: external_exports.string().nullable()
+});
+var RemoteConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  url: external_exports.string().nullable()
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6629,7 +6637,10 @@ var ConfigSchema = external_exports.object({
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
   sync: SyncConfigSchema,
-  recall: RecallConfigSchema
+  recall: RecallConfigSchema,
+  identity: IdentityConfigSchema,
+  remote: RemoteConfigSchema,
+  project: external_exports.string().nullable()
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6689,6 +6700,14 @@ var DEFAULT_RECALL_CONFIG = {
   tokenBudget: 500,
   minPromptLength: 12
 };
+var DEFAULT_IDENTITY_CONFIG = {
+  user: null,
+  environment: null
+};
+var DEFAULT_REMOTE_CONFIG = {
+  enabled: false,
+  url: null
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6699,7 +6718,10 @@ var DEFAULT_CONFIG = {
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
   sync: DEFAULT_SYNC_CONFIG,
-  recall: DEFAULT_RECALL_CONFIG
+  recall: DEFAULT_RECALL_CONFIG,
+  identity: DEFAULT_IDENTITY_CONFIG,
+  remote: DEFAULT_REMOTE_CONFIG,
+  project: null
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -6710,6 +6732,27 @@ function getDataDir() {
 }
 function getConfigPath() {
   return path.join(getDataDir(), "config.json");
+}
+function getProjectConfigDir(cwd) {
+  if (!cwd)
+    return null;
+  const globalDir = path.resolve(getDataDir());
+  let dir = path.resolve(cwd);
+  while (true) {
+    const candidate = path.join(dir, ".cortex");
+    if (path.resolve(candidate) !== globalDir && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return null;
+}
+function getProjectConfigPath(cwd) {
+  const dir = getProjectConfigDir(cwd);
+  return dir ? path.join(dir, "config.json") : null;
 }
 function getDatabasePath() {
   return path.join(getDataDir(), "memory.db");
@@ -6733,6 +6776,23 @@ function getDaemonPort() {
   }
   return loadConfig().daemon.port;
 }
+function isRemoteModeEnabled() {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+function getRemoteUrl() {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim())
+    return null;
+  return remote.url.trim().replace(/\/+$/, "");
+}
+function getRemoteToken() {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+function isSharedBackendEnabled() {
+  return loadConfig().daemon.enabled || isRemoteModeEnabled();
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -6752,26 +6812,40 @@ function deepMerge(target, source) {
   }
   return result;
 }
-function loadConfig() {
-  const configPath = getConfigPath();
-  if (!fs.existsSync(configPath)) {
-    return DEFAULT_CONFIG;
-  }
+function readConfigLayer(filePath) {
+  if (!filePath || !fs.existsSync(filePath))
+    return {};
   try {
-    const content = fs.readFileSync(configPath, "utf8");
-    const loaded = JSON.parse(content);
-    const merged = deepMerge(DEFAULT_CONFIG, loaded);
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function applyEnvOverrides(config) {
+  const remoteUrl = process.env.CORTEX_REMOTE_URL;
+  if (remoteUrl && remoteUrl.trim()) {
+    config = deepMerge(config, { remote: { enabled: true, url: remoteUrl.trim() } });
+  }
+  return config;
+}
+function loadConfig(cwd) {
+  try {
+    const globalLayer = readConfigLayer(getConfigPath());
+    const projectLayer = cwd ? readConfigLayer(getProjectConfigPath(cwd)) : {};
+    let merged = deepMerge(DEFAULT_CONFIG, globalLayer);
+    merged = deepMerge(merged, projectLayer);
+    merged = applyEnvOverrides(merged);
     const result = ConfigSchema.safeParse(merged);
     if (!result.success) {
       const errors = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
       console.error(`Config validation errors:
   ${errors.join("\n  ")}`);
       console.error("Using default configuration");
-      return DEFAULT_CONFIG;
+      return applyEnvOverrides(DEFAULT_CONFIG);
     }
     return result.data;
   } catch {
-    return DEFAULT_CONFIG;
+    return applyEnvOverrides(DEFAULT_CONFIG);
   }
 }
 var activeConfigTempPath = null;
@@ -6808,7 +6882,7 @@ function saveConfig(config) {
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2));
 }
 function updateConfig(updates) {
-  const current = loadConfig();
+  const current = deepMerge(DEFAULT_CONFIG, readConfigLayer(getConfigPath()));
   const updated = deepMerge(current, updates);
   saveConfig(updated);
   return updated;
@@ -7114,16 +7188,121 @@ function configureClaudeStatusline(settingsPath, pluginRoot, options = {}) {
   };
 }
 
+// src/identity.ts
+import * as fs2 from "fs";
+import * as os2 from "os";
+function sanitizeLabel(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+function osUsername() {
+  try {
+    const name = os2.userInfo().username;
+    if (name)
+      return sanitizeLabel(name);
+  } catch {
+  }
+  const envName = process.env.USER || process.env.USERNAME || process.env.LOGNAME;
+  return envName ? sanitizeLabel(envName) : "unknown";
+}
+function resolveUser(config) {
+  const fromEnv = process.env.CORTEX_USER;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.user;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return osUsername();
+}
+function resolveProject(cwd, config) {
+  const fromConfig = config.project;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return sanitizeLabel(getProjectId(cwd));
+}
+function isClaudeWeb() {
+  if (process.env.CLAUDE_CODE_WEB || process.env.CLAUDE_CODE_REMOTE)
+    return true;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === "web")
+    return true;
+  try {
+    if (fs2.existsSync("/root/.ccr/ca-bundle.crt"))
+      return true;
+  } catch {
+  }
+  return false;
+}
+function isWSL() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+    return true;
+  try {
+    const version = fs2.readFileSync("/proc/version", "utf8");
+    return /microsoft/i.test(version);
+  } catch {
+    return false;
+  }
+}
+function platformLabel() {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    default:
+      return process.platform;
+  }
+}
+function detectEnvironment(user) {
+  if (isClaudeWeb())
+    return "claude-web";
+  if (isWSL())
+    return sanitizeLabel(`${user}-wsl`);
+  return sanitizeLabel(`${user}-${platformLabel()}`);
+}
+function resolveEnvironment(config) {
+  const fromEnv = process.env.CORTEX_ENVIRONMENT;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.environment;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return detectEnvironment(resolveUser(config));
+}
+function resolveIdentity(cwd, config) {
+  return {
+    user: resolveUser(config),
+    project: resolveProject(cwd, config),
+    environment: resolveEnvironment(config)
+  };
+}
+
 // src/daemon-client.ts
 import { spawn } from "child_process";
-import * as fs2 from "fs";
+import * as fs3 from "fs";
 
 // src/version.ts
-var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
+var VERSION = "2.6.0" ? "2.6.0" : "0.0.0-dev";
 
 // src/daemon-client.ts
 function getDaemonBaseUrl() {
+  const remote = getRemoteUrl();
+  if (remote)
+    return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+function buildHeaders(hasBody) {
+  const headers = {};
+  if (hasBody)
+    headers["Content-Type"] = "application/json";
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error("Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 async function daemonFetch(path6, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
@@ -7132,7 +7311,7 @@ async function daemonFetch(path6, options = {}) {
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path6}`, {
       method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      headers: buildHeaders(body !== void 0),
       body: body !== void 0 ? JSON.stringify(body) : void 0,
       signal: controller.signal
     });
@@ -7160,9 +7339,11 @@ function getDaemonScriptPath() {
   return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
 }
 function spawnDaemonDetached() {
+  if (isRemoteModeEnabled())
+    return false;
   try {
     const daemonPath = getDaemonScriptPath();
-    if (!fs2.existsSync(daemonPath)) {
+    if (!fs3.existsSync(daemonPath)) {
       return false;
     }
     const child = spawn(process.execPath, [daemonPath], {
@@ -7177,6 +7358,8 @@ function spawnDaemonDetached() {
   }
 }
 async function stopDaemon() {
+  if (isRemoteModeEnabled())
+    return false;
   let requested = false;
   try {
     await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
@@ -7184,8 +7367,8 @@ async function stopDaemon() {
   } catch {
     try {
       const infoPath = getDaemonInfoPath();
-      if (fs2.existsSync(infoPath)) {
-        const info = JSON.parse(fs2.readFileSync(infoPath, "utf8"));
+      if (fs3.existsSync(infoPath)) {
+        const info = JSON.parse(fs3.readFileSync(infoPath, "utf8"));
         if (info.pid) {
           process.kill(info.pid, "SIGTERM");
           requested = true;
@@ -7197,9 +7380,18 @@ async function stopDaemon() {
   return requested;
 }
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function ensureDaemon(waitMs = 1e4) {
+  if (isRemoteModeEnabled()) {
+    const remoteHealth = await getDaemonHealth(Math.min(waitMs, 3e3));
+    if (remoteHealth && remoteHealth.version !== VERSION) {
+      console.error(
+        `[cortex] Remote brain version ${remoteHealth.version} differs from plugin ${VERSION}`
+      );
+    }
+    return remoteHealth !== null;
+  }
   const health = await getDaemonHealth();
   if (health && health.version === VERSION) {
     return true;
@@ -7237,8 +7429,19 @@ async function getDaemonStats(projectId, timeoutMs = 400) {
 }
 async function requestDaemonArchive(params) {
   const { timeoutMs = params.async ? 1500 : 55e3, ...body } = params;
+  const outbound = { ...body };
+  if (isRemoteModeEnabled()) {
+    try {
+      if (fs3.existsSync(body.transcriptPath)) {
+        outbound.transcriptContent = fs3.readFileSync(body.transcriptPath, "utf8");
+      }
+    } catch {
+    }
+    const config = loadConfig();
+    outbound.identity = { user: resolveUser(config), environment: resolveEnvironment(config) };
+  }
   try {
-    const result = await daemonFetch("/archive", { method: "POST", body, timeoutMs });
+    const result = await daemonFetch("/archive", { method: "POST", body: outbound, timeoutMs });
     return result;
   } catch {
     return null;
@@ -7263,13 +7466,42 @@ async function requestDaemonRestore(params) {
   }
 }
 
+// src/daemon-auth.ts
+import * as crypto2 from "crypto";
+function isServerMode(argv = process.argv) {
+  const flag = process.env.CORTEX_SERVER;
+  return argv.includes("--server") || flag === "1" || flag === "true";
+}
+function getBindHost(argv = process.argv) {
+  return isServerMode(argv) ? "0.0.0.0" : "127.0.0.1";
+}
+function getServerToken() {
+  const token = process.env.CORTEX_SERVER_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+function isAuthorized(authHeader) {
+  const expected = getServerToken();
+  if (!expected)
+    return true;
+  if (!authHeader)
+    return false;
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  if (!match)
+    return false;
+  const provided = Buffer.from(match[1]);
+  const expectedBuf = Buffer.from(expected);
+  if (provided.length !== expectedBuf.length)
+    return false;
+  return crypto2.timingSafeEqual(provided, expectedBuf);
+}
+
 // src/index.ts
 import { spawn as spawn2, execSync } from "child_process";
 
 // src/database.ts
 var import_sql = __toESM(require_sql_wasm(), 1);
-import * as fs3 from "fs";
-import * as os2 from "os";
+import * as fs4 from "fs";
+import * as os3 from "os";
 import * as path2 from "path";
 
 // src/storage.ts
@@ -7328,7 +7560,7 @@ async function tryOpenNative(dbPath) {
 }
 
 // src/database.ts
-import * as crypto2 from "crypto";
+import * as crypto3 from "crypto";
 var dbInstance = null;
 var SQL = null;
 var fts5Available = false;
@@ -7341,7 +7573,7 @@ var activeTempPath = null;
 function cleanupOrphanedTempFiles() {
   const dataDir = path2.dirname(getDatabasePath());
   try {
-    const files = fs3.readdirSync(dataDir);
+    const files = fs4.readdirSync(dataDir);
     const currentPid = process.pid;
     for (const file of files) {
       const match = file.match(/\.tmp\.(\d+)\.\d+$/);
@@ -7354,7 +7586,7 @@ function cleanupOrphanedTempFiles() {
         process.kill(filePid, 0);
       } catch {
         try {
-          fs3.unlinkSync(path2.join(dataDir, file));
+          fs4.unlinkSync(path2.join(dataDir, file));
         } catch {
         }
       }
@@ -7365,14 +7597,14 @@ function cleanupOrphanedTempFiles() {
 function cleanupAllTempFiles() {
   if (activeTempPath) {
     try {
-      fs3.unlinkSync(activeTempPath);
+      fs4.unlinkSync(activeTempPath);
     } catch {
     }
     activeTempPath = null;
   }
   cleanupActiveConfigTempFile();
 }
-var signals = os2.constants.signals;
+var signals = os3.constants.signals;
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   process.on(sig, () => {
     cleanupAllTempFiles();
@@ -7425,11 +7657,11 @@ async function initDb(options = {}) {
       if (!SQL) {
         SQL = await (0, import_sql.default)();
       }
-      if (fs3.existsSync(dbPath)) {
+      if (fs4.existsSync(dbPath)) {
         let loadedDb = null;
         let needsRecovery = false;
         try {
-          const buffer = fs3.readFileSync(dbPath);
+          const buffer = fs4.readFileSync(dbPath);
           loadedDb = new SQL.Database(buffer);
           const validation = validateDatabase(loadedDb);
           if (!validation.valid) {
@@ -7446,8 +7678,8 @@ async function initDb(options = {}) {
             const data = loadedDb.export();
             const tempPath = `${dbPath}.tmp.${process.pid}.${Date.now()}`;
             activeTempPath = tempPath;
-            fs3.writeFileSync(tempPath, Buffer.from(data));
-            fs3.renameSync(tempPath, dbPath);
+            fs4.writeFileSync(tempPath, Buffer.from(data));
+            fs4.renameSync(tempPath, dbPath);
             activeTempPath = null;
           }
         }
@@ -7478,10 +7710,10 @@ async function initDb(options = {}) {
 var MAX_BACKUPS = 5;
 function createBackupOnStartup() {
   const dbPath = getDatabasePath();
-  if (!fs3.existsSync(dbPath)) {
+  if (!fs4.existsSync(dbPath)) {
     return;
   }
-  const stats = fs3.statSync(dbPath);
+  const stats = fs4.statSync(dbPath);
   if (stats.size === 0) {
     return;
   }
@@ -7490,36 +7722,36 @@ function createBackupOnStartup() {
   const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
   const backupPath = path2.join(backupsDir, `memory.db.backup.${timestamp}`);
   try {
-    fs3.copyFileSync(dbPath, backupPath);
+    fs4.copyFileSync(dbPath, backupPath);
     rotateBackups();
   } catch {
   }
 }
 function rotateBackups() {
   const backupsDir = getBackupsDir();
-  if (!fs3.existsSync(backupsDir)) {
+  if (!fs4.existsSync(backupsDir)) {
     return;
   }
-  const files = fs3.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => ({
+  const files = fs4.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => ({
     name: f,
     path: path2.join(backupsDir, f),
-    mtime: fs3.statSync(path2.join(backupsDir, f)).mtime.getTime()
+    mtime: fs4.statSync(path2.join(backupsDir, f)).mtime.getTime()
   })).sort((a, b) => b.mtime - a.mtime);
   for (let i = MAX_BACKUPS; i < files.length; i++) {
     try {
-      fs3.unlinkSync(files[i].path);
+      fs4.unlinkSync(files[i].path);
     } catch {
     }
   }
 }
 function getBackupFiles() {
   const backupsDir = getBackupsDir();
-  if (!fs3.existsSync(backupsDir)) {
+  if (!fs4.existsSync(backupsDir)) {
     return [];
   }
-  return fs3.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => path2.join(backupsDir, f)).sort((a, b) => {
-    const aTime = fs3.statSync(a).mtime.getTime();
-    const bTime = fs3.statSync(b).mtime.getTime();
+  return fs4.readdirSync(backupsDir).filter((f) => f.startsWith("memory.db.backup.")).map((f) => path2.join(backupsDir, f)).sort((a, b) => {
+    const aTime = fs4.statSync(a).mtime.getTime();
+    const bTime = fs4.statSync(b).mtime.getTime();
     return bTime - aTime;
   });
 }
@@ -7592,7 +7824,7 @@ function attemptRecovery() {
   const backups = getBackupFiles();
   for (const backupPath of backups) {
     try {
-      const buffer = fs3.readFileSync(backupPath);
+      const buffer = fs4.readFileSync(backupPath);
       const db = new SQL.Database(buffer);
       const validation = validateDatabase(db);
       if (validation.valid) {
@@ -7632,6 +7864,12 @@ function createSchema(db, options = {}) {
     db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
   } catch {
   }
+  for (const col of ["user TEXT", "environment TEXT", "category TEXT DEFAULT 'project'"]) {
+    try {
+      db.run(`ALTER TABLE memories ADD COLUMN ${col}`);
+    } catch {
+    }
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS sync_tombstones (
       content_hash TEXT PRIMARY KEY,
@@ -7642,6 +7880,9 @@ function createSchema(db, options = {}) {
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_environment ON memories(environment)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)`);
   db.run(`
     CREATE TABLE IF NOT EXISTS session_turns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7721,14 +7962,14 @@ function saveDb(db) {
   const tempPath = `${dbPath}.tmp.${process.pid}.${Date.now()}`;
   try {
     activeTempPath = tempPath;
-    fs3.writeFileSync(tempPath, buffer);
-    fs3.renameSync(tempPath, dbPath);
+    fs4.writeFileSync(tempPath, buffer);
+    fs4.renameSync(tempPath, dbPath);
     activeTempPath = null;
   } catch (error) {
     activeTempPath = null;
     try {
-      if (fs3.existsSync(tempPath)) {
-        fs3.unlinkSync(tempPath);
+      if (fs4.existsSync(tempPath)) {
+        fs4.unlinkSync(tempPath);
       }
     } catch {
     }
@@ -7745,7 +7986,7 @@ function closeDb() {
   storageKind = "wasm";
 }
 function hashContent(content) {
-  return crypto2.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
+  return crypto3.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
 }
 function embeddingToBuffer(embedding) {
   return Buffer.from(embedding.buffer);
@@ -7763,20 +8004,43 @@ function insertMemory(db, memory) {
     return { id: existing[0].values[0][0], isDuplicate: true };
   }
   db.run(
-    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp, user, environment, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       memory.content,
       hash,
       embeddingToBuffer(memory.embedding),
       memory.projectId,
       memory.sourceSession,
-      memory.timestamp.toISOString()
+      memory.timestamp.toISOString(),
+      memory.user ?? null,
+      memory.environment ?? null,
+      memory.category ?? "project"
     ]
   );
   const result = db.exec(`SELECT last_insert_rowid()`);
   const id = result[0].values[0][0];
   return { id, isDuplicate: false };
+}
+function getMemory(db, id) {
+  const result = db.exec(
+    `SELECT id, content, content_hash, embedding, project_id, source_session, timestamp
+     FROM memories WHERE id = ?`,
+    [id]
+  );
+  if (result.length === 0 || result[0].values.length === 0) {
+    return null;
+  }
+  const row = result[0].values[0];
+  return {
+    id: row[0],
+    content: row[1],
+    contentHash: row[2],
+    embedding: bufferToEmbedding(row[3]),
+    projectId: row[4],
+    sourceSession: row[5],
+    timestamp: new Date(row[6])
+  };
 }
 function contentExists(db, content) {
   const hash = hashContent(content);
@@ -7835,17 +8099,47 @@ function getRecentMemories(db, projectId, limit = 10) {
     timestamp: new Date(row[3])
   }));
 }
-function searchByVector(db, queryEmbedding, projectId, limit = 10) {
-  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
-  const params = [];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      query += ` WHERE project_id IS NULL`;
-    } else {
-      query += ` WHERE project_id = ?`;
-      params.push(projectId);
-    }
+function buildScopeClause(scope, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  const mode = scope.mode ?? "auto";
+  const user = scope.user ?? null;
+  const environment = scope.environment ?? null;
+  const project = scope.project ?? null;
+  switch (mode) {
+    case "all":
+      return { clause: "", params: [] };
+    case "global":
+      return { clause: `${a}category = 'global'`, params: [] };
+    case "user":
+      return { clause: `${a}category = 'user' AND ${a}user = ?`, params: [user] };
+    case "environment":
+      return { clause: `${a}category = 'environment' AND ${a}environment = ?`, params: [environment] };
+    case "project":
+      return {
+        clause: `(${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?`,
+        params: [project]
+      };
+    case "auto":
+    default:
+      return {
+        clause: `(${a}category = 'global' OR (${a}category = 'user' AND ${a}user = ?) OR (${a}category = 'environment' AND ${a}environment = ?) OR ((${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?))`,
+        params: [user, environment, project]
+      };
   }
+}
+function buildLegacyProjectClause(projectId, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  if (projectId === void 0)
+    return { clause: "", params: [] };
+  if (projectId === null)
+    return { clause: `${a}project_id IS NULL`, params: [] };
+  return { clause: `${a}project_id = ?`, params: [projectId] };
+}
+function searchByVector(db, queryEmbedding, projectId, limit = 10, scope) {
+  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
+  const { clause, params } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause)
+    query += ` WHERE ${clause}`;
   const result = db.exec(query, params);
   if (result.length === 0 || result[0].values.length === 0) {
     return [];
@@ -7863,20 +8157,20 @@ function searchByVector(db, queryEmbedding, projectId, limit = 10) {
   });
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
 }
-function searchByKeyword(db, query, projectId, limit = 10) {
+function searchByKeyword(db, query, projectId, limit = 10, scope) {
   const cleanQuery = query.replace(/['"]/g, "").trim();
   if (!cleanQuery) {
     return [];
   }
   if (fts5Available) {
     try {
-      return searchByFts5(db, cleanQuery, projectId, limit);
+      return searchByFts5(db, cleanQuery, projectId, limit, scope);
     } catch {
     }
   }
-  return searchByLike(db, cleanQuery, projectId, limit);
+  return searchByLike(db, cleanQuery, projectId, limit, scope);
 }
-function searchByFts5(db, query, projectId, limit = 10) {
+function searchByFts5(db, query, projectId, limit = 10, scope) {
   let sql = `
     SELECT m.id, m.content, m.project_id, m.timestamp,
            bm25(memories_fts) as rank
@@ -7885,13 +8179,10 @@ function searchByFts5(db, query, projectId, limit = 10) {
     WHERE memories_fts MATCH ?
   `;
   const params = [query];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND m.project_id IS NULL`;
-    } else {
-      sql += ` AND m.project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope, "m") : buildLegacyProjectClause(projectId, "m");
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY rank LIMIT ?`;
   params.push(limit.toString());
@@ -7908,7 +8199,7 @@ function searchByFts5(db, query, projectId, limit = 10) {
     // BM25 returns negative scores
   }));
 }
-function searchByLike(db, query, projectId, limit = 10) {
+function searchByLike(db, query, projectId, limit = 10, scope) {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) {
     return [];
@@ -7921,13 +8212,10 @@ function searchByLike(db, query, projectId, limit = 10) {
     FROM memories
     WHERE ${conditions.join(" AND ")}
   `;
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND project_id IS NULL`;
-    } else {
-      sql += ` AND project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY timestamp DESC LIMIT ?`;
   params.push(limit.toString());
@@ -7959,8 +8247,8 @@ function getStats(db) {
   const newestTimestamp = newestStr ? new Date(newestStr) : null;
   const dbPath = getDatabasePath();
   let dbSizeBytes = 0;
-  if (fs3.existsSync(dbPath)) {
-    dbSizeBytes = fs3.statSync(dbPath).size;
+  if (fs4.existsSync(dbPath)) {
+    dbSizeBytes = fs4.statSync(dbPath).size;
   }
   return {
     fragmentCount,
@@ -8091,7 +8379,7 @@ function compactDatabase(db, options = {}) {
     pruneMemoriesOlderThanDays = null
   } = options;
   const dbPath = getDatabasePath();
-  const sizeBefore = fs3.existsSync(dbPath) ? fs3.statSync(dbPath).size : 0;
+  const sizeBefore = fs4.existsSync(dbPath) ? fs4.statSync(dbPath).size : 0;
   const result = {
     turnsDeleted: 0,
     progressDeleted: 0,
@@ -8122,7 +8410,7 @@ function compactDatabase(db, options = {}) {
   } else {
     saveDb(db);
   }
-  result.sizeAfter = fs3.existsSync(dbPath) ? fs3.statSync(dbPath).size : 0;
+  result.sizeAfter = fs4.existsSync(dbPath) ? fs4.statSync(dbPath).size : 0;
   return result;
 }
 function cosineSimilarity(a, b) {
@@ -8219,7 +8507,7 @@ async function embedQuery(text) {
   return new Float32Array(output.data);
 }
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function embedSingleWithRetry(pipe, text, maxRetries = 3, baseDelayMs = 100) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -8323,13 +8611,14 @@ async function hybridSearch(db, query, options = {}) {
     projectScope = true,
     projectId,
     limit = 5,
-    includeAllProjects = false
+    includeAllProjects = false,
+    scope
   } = options;
   const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
   const queryEmbedding = await embedQuery(query);
   const [vectorResults, keywordResults] = await Promise.all([
-    searchByVector(db, queryEmbedding, projectFilter, limit * 2),
-    searchByKeyword(db, query, projectFilter, limit * 2)
+    searchByVector(db, queryEmbedding, projectFilter, limit * 2, scope),
+    searchByKeyword(db, query, projectFilter, limit * 2, scope)
   ]);
   const combined = combineWithRRF(vectorResults, keywordResults);
   const withRecency = applyRecencyDecay(combined);
@@ -8341,11 +8630,12 @@ async function vectorSearch(db, query, options = {}) {
     projectScope = true,
     projectId,
     limit = 5,
-    includeAllProjects = false
+    includeAllProjects = false,
+    scope
   } = options;
   const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
   const queryEmbedding = await embedQuery(query);
-  const results = searchByVector(db, queryEmbedding, projectFilter, limit);
+  const results = searchByVector(db, queryEmbedding, projectFilter, limit, scope);
   return results.map((r) => ({
     id: r.id,
     score: r.score,
@@ -8457,7 +8747,7 @@ function formatTimeAgo(date) {
 }
 
 // src/recall-auto.ts
-import * as fs4 from "fs";
+import * as fs5 from "fs";
 import * as path3 from "path";
 function isPromptEligible(prompt, config) {
   const trimmed = prompt.trim();
@@ -8519,7 +8809,7 @@ function getRecallStatePath() {
 }
 function loadRecallState() {
   try {
-    const raw = fs4.readFileSync(getRecallStatePath(), "utf8");
+    const raw = fs5.readFileSync(getRecallStatePath(), "utf8");
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.sessions === "object" && parsed.sessions !== null) {
       return parsed;
@@ -8540,14 +8830,14 @@ function recordInjection(state, sessionId, ids) {
   const entries = Object.entries(state.sessions).sort((a, b) => (b[1].updatedAt || "").localeCompare(a[1].updatedAt || "")).slice(0, MAX_TRACKED_SESSIONS);
   state.sessions = Object.fromEntries(entries);
   try {
-    fs4.mkdirSync(getDataDir(), { recursive: true });
+    fs5.mkdirSync(getDataDir(), { recursive: true });
     atomicWriteFileSync(getRecallStatePath(), JSON.stringify(state, null, 2));
   } catch {
   }
 }
 
 // src/archive.ts
-import * as fs5 from "fs";
+import * as fs6 from "fs";
 import * as readline from "readline";
 
 // src/logger.ts
@@ -8646,27 +8936,33 @@ var VALUABLE_PATTERNS = [
   /config|setting|option|parameter/i
 ];
 async function parseTranscript(transcriptPath, startLine = 0) {
-  const result = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0
-    }
-  };
-  if (!fs5.existsSync(transcriptPath)) {
-    return result;
+  if (!fs6.existsSync(transcriptPath)) {
+    return emptyParseResult();
   }
-  const fileStream = fs5.createReadStream(transcriptPath);
+  const fileStream = fs6.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
   });
+  return parseTranscriptLines(rl, startLine);
+}
+function parseTranscriptContent(content, startLine = 0) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+function emptyParseResult() {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 }
+  };
+}
+async function parseTranscriptLines(lines, startLine) {
+  const result = emptyParseResult();
   const toolIdMap = /* @__PURE__ */ new Map();
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines) {
     currentLine++;
     if (currentLine <= startLine) {
       result.stats.totalLines++;
@@ -8966,6 +9262,11 @@ async function appendSessionTurns(db, newMessages, projectId, sessionId) {
 async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
+  const identity = {
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
+    category: "project"
+  };
   const result = {
     archived: 0,
     skipped: 0,
@@ -8973,7 +9274,7 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   };
   const sessionId = getSessionId(transcriptPath);
   const startLine = getSessionProgress(db, sessionId);
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  const { messages, stats: parseStats } = options.transcriptContent !== void 0 ? await parseTranscriptContent(options.transcriptContent, startLine) : await parseTranscript(transcriptPath, startLine);
   if (messages.length === 0) {
     if (parseStats.totalLines > startLine) {
       updateSessionProgress(db, sessionId, parseStats.totalLines);
@@ -9037,7 +9338,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
       embedding,
       projectId,
       sourceSession: sessionId,
-      timestamp
+      timestamp,
+      ...identity
     });
     if (isDuplicate) {
       result.duplicates++;
@@ -9194,16 +9496,16 @@ function formatTimeAgo2(date) {
 }
 
 // src/analytics.ts
-import * as fs6 from "fs";
+import * as fs7 from "fs";
 var ANALYTICS_VERSION = 1;
 var MAX_SESSIONS_TO_KEEP = 100;
 function getAnalytics() {
   const analyticsPath = getAnalyticsPath();
-  if (!fs6.existsSync(analyticsPath)) {
+  if (!fs7.existsSync(analyticsPath)) {
     return createEmptyAnalytics();
   }
   try {
-    const content = fs6.readFileSync(analyticsPath, "utf8");
+    const content = fs7.readFileSync(analyticsPath, "utf8");
     const data = JSON.parse(content);
     if (data.version !== ANALYTICS_VERSION) {
       return migrateAnalytics(data);
@@ -9219,7 +9521,7 @@ function saveAnalytics(data) {
   if (data.sessions.length > MAX_SESSIONS_TO_KEEP) {
     data.sessions = data.sessions.slice(-MAX_SESSIONS_TO_KEEP);
   }
-  fs6.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
+  fs7.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
 }
 function createEmptyAnalytics() {
   return {
@@ -9285,7 +9587,7 @@ function generateSessionId() {
 }
 
 // src/backup.ts
-import * as fs7 from "fs";
+import * as fs8 from "fs";
 import * as path4 from "path";
 import * as zlib from "zlib";
 import { pipeline } from "stream/promises";
@@ -9306,7 +9608,7 @@ function getBackupStatePath() {
 }
 function loadBackupState() {
   try {
-    const raw = fs7.readFileSync(getBackupStatePath(), "utf8");
+    const raw = fs8.readFileSync(getBackupStatePath(), "utf8");
     return { ...EMPTY_STATE, ...JSON.parse(raw) };
   } catch {
     return { ...EMPTY_STATE };
@@ -9314,7 +9616,7 @@ function loadBackupState() {
 }
 function saveBackupState(state) {
   try {
-    fs7.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
+    fs8.writeFileSync(getBackupStatePath(), JSON.stringify(state, null, 2));
   } catch {
   }
 }
@@ -9328,12 +9630,12 @@ function isBackupDue(config) {
   return elapsed >= config.intervalMinutes * 60 * 1e3;
 }
 function rclone(args, timeoutMs = RCLONE_TIMEOUT_MS) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     execFile("rclone", args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         reject(new Error(`rclone ${args[0]} failed: ${stderr?.trim() || error.message}`));
       } else {
-        resolve(stdout);
+        resolve2(stdout);
       }
     });
   });
@@ -9348,7 +9650,7 @@ async function rcloneAvailable() {
 }
 function snapshotTmpDir() {
   const dir = path4.join(getDataDir(), "backup-tmp");
-  fs7.mkdirSync(dir, { recursive: true });
+  fs8.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function snapshotName() {
@@ -9357,36 +9659,36 @@ function snapshotName() {
 }
 function createSnapshotFromDb(db, kind, outPath) {
   if (kind === "native") {
-    if (fs7.existsSync(outPath))
-      fs7.unlinkSync(outPath);
+    if (fs8.existsSync(outPath))
+      fs8.unlinkSync(outPath);
     db.run("VACUUM INTO ?", [outPath]);
   } else {
-    fs7.writeFileSync(outPath, db.export());
+    fs8.writeFileSync(outPath, db.export());
   }
 }
 async function createSnapshotFromFile(outPath) {
   const dbPath = getDatabasePath();
-  if (!fs7.existsSync(dbPath)) {
+  if (!fs8.existsSync(dbPath)) {
     throw new Error(`Database not found at ${dbPath}`);
   }
   const native = await tryOpenNative(dbPath);
   if (native) {
     try {
-      if (fs7.existsSync(outPath))
-        fs7.unlinkSync(outPath);
+      if (fs8.existsSync(outPath))
+        fs8.unlinkSync(outPath);
       native.run("VACUUM INTO ?", [outPath]);
       return;
     } finally {
       native.close();
     }
   }
-  fs7.copyFileSync(dbPath, outPath);
+  fs8.copyFileSync(dbPath, outPath);
 }
 async function gzipFile(srcPath, destPath) {
   await pipeline(
-    fs7.createReadStream(srcPath),
+    fs8.createReadStream(srcPath),
     zlib.createGzip({ level: 6 }),
-    fs7.createWriteStream(destPath)
+    fs8.createWriteStream(destPath)
   );
 }
 async function rotateRemote(remote, keep) {
@@ -9430,7 +9732,7 @@ async function runBackup(source = {}) {
       await createSnapshotFromFile(rawPath);
     }
     await gzipFile(rawPath, gzPath);
-    const sizeBytes = fs7.statSync(gzPath).size;
+    const sizeBytes = fs8.statSync(gzPath).size;
     await rclone(["copyto", gzPath, `${config.remote}/${name}`]);
     const rotatedOut = await rotateRemote(config.remote, config.keep);
     const result = {
@@ -9459,7 +9761,7 @@ async function runBackup(source = {}) {
   } finally {
     for (const p of [rawPath, gzPath]) {
       try {
-        fs7.unlinkSync(p);
+        fs8.unlinkSync(p);
       } catch {
       }
     }
@@ -9467,11 +9769,11 @@ async function runBackup(source = {}) {
 }
 
 // src/sync.ts
-import * as fs8 from "fs";
-import * as os3 from "os";
+import * as fs9 from "fs";
+import * as os4 from "os";
 import * as path5 from "path";
 import * as zlib2 from "zlib";
-import * as crypto3 from "crypto";
+import * as crypto4 from "crypto";
 var CHANGELOG_SUFFIX = ".jsonl.gz";
 var MAX_LINES_PER_FILE = 5e3;
 var SEQ_PAD = 8;
@@ -9490,7 +9792,7 @@ function getSyncStatePath() {
 }
 function loadSyncState() {
   try {
-    const raw = fs8.readFileSync(getSyncStatePath(), "utf8");
+    const raw = fs9.readFileSync(getSyncStatePath(), "utf8");
     const parsed = JSON.parse(raw);
     return { ...EMPTY_SYNC_STATE, ...parsed, peers: { ...parsed.peers ?? {} } };
   } catch {
@@ -9498,13 +9800,13 @@ function loadSyncState() {
   }
 }
 function saveSyncState(state) {
-  fs8.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
+  fs9.writeFileSync(getSyncStatePath(), JSON.stringify(state, null, 2));
 }
 function ensureDeviceId(state) {
   if (state.deviceId)
     return state.deviceId;
-  const host = os3.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
-  state.deviceId = `${host}-${crypto3.randomBytes(3).toString("hex")}`;
+  const host = os4.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
+  state.deviceId = `${host}-${crypto4.randomBytes(3).toString("hex")}`;
   saveSyncState(state);
   return state.deviceId;
 }
@@ -9518,7 +9820,7 @@ function isSyncDue(config) {
 }
 function tmpDir() {
   const dir = path5.join(getDataDir(), "sync-tmp");
-  fs8.mkdirSync(dir, { recursive: true });
+  fs9.mkdirSync(dir, { recursive: true });
   return dir;
 }
 function seqName(seq) {
@@ -9589,11 +9891,11 @@ async function pushChanges(db, state, config, remote) {
     const localPath = path5.join(tmpDir(), name);
     try {
       const jsonl = chunk.map((e) => JSON.stringify(e.line)).join("\n") + "\n";
-      fs8.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
+      fs9.writeFileSync(localPath, zlib2.gzipSync(jsonl, { level: 6 }));
       await rclone(["copyto", localPath, `${remote}/${deviceId}/${name}`]);
     } finally {
       try {
-        fs8.unlinkSync(localPath);
+        fs9.unlinkSync(localPath);
       } catch {
       }
     }
@@ -9680,11 +9982,11 @@ async function pullChanges(db, state, remote) {
         let lines;
         try {
           await rclone(["copyto", `${remote}/${peer}/${file.name}`, localPath]);
-          const jsonl = zlib2.gunzipSync(fs8.readFileSync(localPath)).toString("utf8");
+          const jsonl = zlib2.gunzipSync(fs9.readFileSync(localPath)).toString("utf8");
           lines = jsonl.split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
         } finally {
           try {
-            fs8.unlinkSync(localPath);
+            fs9.unlinkSync(localPath);
           } catch {
           }
         }
@@ -9727,7 +10029,7 @@ async function runSync(db, options = {}) {
 }
 
 // src/index.ts
-import { appendFileSync, existsSync as existsSync7, mkdirSync as mkdirSync5 } from "fs";
+import { appendFileSync, existsSync as existsSync8, mkdirSync as mkdirSync5 } from "fs";
 import { homedir as homedir2 } from "os";
 import { join as join6 } from "path";
 var ANSI = {
@@ -9751,7 +10053,7 @@ function debugLog(context, message, data) {
   if (!DEBUG_ENABLED)
     return;
   try {
-    if (!existsSync7(DEBUG_LOG_DIR)) {
+    if (!existsSync8(DEBUG_LOG_DIR)) {
       mkdirSync5(DEBUG_LOG_DIR, { recursive: true });
     }
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
@@ -9882,7 +10184,7 @@ function executeChainedStatusline() {
 async function handleStatusline() {
   const stdin = await readStdin();
   const config = loadConfig();
-  const daemonMode = config.daemon.enabled;
+  const daemonMode = isSharedBackendEnabled();
   let remoteStats = null;
   let db = null;
   if (daemonMode) {
@@ -10065,7 +10367,7 @@ async function handleSessionStart() {
     saveCurrentSession(stdin.transcript_path, projectId);
   }
   startSession(projectId);
-  if (config.daemon.enabled) {
+  if (isSharedBackendEnabled()) {
     const handled = await sessionStartViaDaemon(config, projectId);
     if (handled)
       return;
@@ -10149,7 +10451,7 @@ async function handleSessionEnd() {
   }
   const projectId = stdin.cwd ? getProjectId(stdin.cwd) : null;
   console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.cyan}Saving session before exit...`);
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
+  if (isSharedBackendEnabled() && await ensureDaemon(5e3)) {
     const result2 = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
       projectId,
@@ -10159,6 +10461,10 @@ async function handleSessionEnd() {
       if (result2.archived > 0) {
         console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.green}Saved ${result2.archived} memories`);
       }
+      return;
+    }
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not saved`);
       return;
     }
   }
@@ -10176,7 +10482,7 @@ async function handlePostTool() {
   if (config.autosave.contextStep.enabled) {
     const currentPercent = getContextPercent(stdin);
     if (shouldAutoSave(currentPercent, stdin.transcript_path)) {
-      if (config.daemon.enabled) {
+      if (isSharedBackendEnabled()) {
         setSavingState(true, stdin.transcript_path);
         const queued = await requestDaemonArchive({
           transcriptPath: stdin.transcript_path,
@@ -10257,7 +10563,7 @@ async function handlePreCompact() {
     return;
   }
   const projectId = config.archive.projectScope && stdin.cwd ? getProjectId(stdin.cwd) : null;
-  if (config.daemon.enabled && await ensureDaemon(5e3)) {
+  if (isSharedBackendEnabled() && await ensureDaemon(5e3)) {
     console.log(`${ANSI.brick}\u03A8${ANSI.reset} Auto-archiving before compact...`);
     const result2 = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
@@ -10287,6 +10593,10 @@ async function handlePreCompact() {
         }
         console.log(`${ANSI.cyan}===========================${ANSI.reset}`);
       }
+      return;
+    }
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}\u03A8${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not archived`);
       return;
     }
   }
@@ -10398,8 +10708,8 @@ async function handleAutoRecall() {
     minScore: config.recall.minScore
   });
   if (results === null) {
-    if (config.daemon.enabled) {
-      debugLog("handleAutoRecall", "Daemon unreachable or missing /recall; skipping (daemon mode)");
+    if (config.daemon.enabled || isRemoteModeEnabled()) {
+      debugLog("handleAutoRecall", "Shared backend unreachable or missing /recall; skipping");
       return;
     }
     try {
@@ -10461,12 +10771,12 @@ async function handleSetup(setupArgs = []) {
   const db = await initDb();
   saveDb(db);
   console.log("  \u2713 Database initialized");
-  const fs9 = await import("fs");
+  const fs10 = await import("fs");
   const path6 = await import("path");
-  const os4 = await import("os");
+  const os5 = await import("os");
   const pluginDir = new URL(".", import.meta.url).pathname.replace("/dist/", "");
   const nodeModulesPath = `${pluginDir}/node_modules`;
-  if (!fs9.existsSync(nodeModulesPath)) {
+  if (!fs10.existsSync(nodeModulesPath)) {
     console.log("  \u23F3 Installing dependencies (first run only)...");
     const { execSync: execSync2 } = await import("child_process");
     try {
@@ -10493,7 +10803,7 @@ async function handleSetup(setupArgs = []) {
     return;
   }
   console.log("  \u23F3 Configuring statusline...");
-  const claudeDir = path6.join(os4.homedir(), ".claude");
+  const claudeDir = path6.join(os5.homedir(), ".claude");
   const claudeSettingsPath = path6.join(claudeDir, "settings.json");
   const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || pluginDir;
   const statuslineResult = configureClaudeStatusline(claudeSettingsPath, pluginRoot);
@@ -10944,19 +11254,29 @@ if (isDirectRun || !isTestImport && process.argv.length > 1) {
 export {
   archiveSession,
   buildCortexStatuslineCommand,
+  buildScopeClause,
   closeDb,
   compactDatabase,
   configureClaudeStatusline,
   deleteMemory,
   embedQuery,
+  ensureDaemon,
   ensureDeviceId,
   formatDuration,
   formatInjection,
   getBackupStatePath,
+  getBindHost,
   getContextPercent,
+  getDaemonBaseUrl,
   getInjectedIds,
+  getMemory,
+  getProjectConfigDir,
+  getProjectConfigPath,
   getProjectId,
   getRecallStatePath,
+  getRemoteToken,
+  getRemoteUrl,
+  getServerToken,
   getStorageKind,
   getSyncStatePath,
   handleCheckDb,
@@ -10973,8 +11293,12 @@ export {
   hybridSearch,
   initDb,
   insertMemory,
+  isAuthorized,
   isBackupDue,
   isPromptEligible,
+  isRemoteModeEnabled,
+  isServerMode,
+  isSharedBackendEnabled,
   isSyncDue,
   loadAutoSaveState,
   loadBackupState,
@@ -10982,13 +11306,25 @@ export {
   loadRecallState,
   loadSyncState,
   markAutoSaved,
+  parseTranscript,
+  parseTranscriptContent,
   readStdinWithResult,
   recordInjection,
+  requestDaemonArchive,
   resetAutoSaveState,
+  resolveEnvironment,
+  resolveIdentity,
+  resolveProject,
+  resolveUser,
   runBackup,
   runSync,
+  sanitizeLabel,
   saveDb,
+  searchByKeyword,
+  searchByVector,
   selectForInjection,
   shouldAutoSave,
+  spawnDaemonDetached,
+  stopDaemon,
   vectorSearch
 };

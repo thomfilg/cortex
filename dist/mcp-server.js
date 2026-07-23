@@ -599,15 +599,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs6 = __require("node:fs");
+          var fs8 = __require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs6.readFileSync(a);
+            return fs8.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs6.readFileSync(a, void 0);
+            return fs8.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -915,7 +915,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs6.readSync(d, b, 0, 256);
+                  c = fs8.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2408,6 +2408,7 @@ var require_sql_wasm = __commonJS({
 
 // src/mcp-server.ts
 import * as readline2 from "readline";
+import * as fs7 from "fs";
 
 // src/database.ts
 var import_sql = __toESM(require_sql_wasm(), 1);
@@ -6518,6 +6519,14 @@ var RecallConfigSchema = external_exports.object({
   tokenBudget: external_exports.number().min(50).max(1e4),
   minPromptLength: external_exports.number().min(0).max(1e3)
 });
+var IdentityConfigSchema = external_exports.object({
+  user: external_exports.string().nullable(),
+  environment: external_exports.string().nullable()
+});
+var RemoteConfigSchema = external_exports.object({
+  enabled: external_exports.boolean(),
+  url: external_exports.string().nullable()
+});
 var ConfigSchema = external_exports.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -6528,7 +6537,10 @@ var ConfigSchema = external_exports.object({
   daemon: DaemonConfigSchema,
   backup: BackupConfigSchema,
   sync: SyncConfigSchema,
-  recall: RecallConfigSchema
+  recall: RecallConfigSchema,
+  identity: IdentityConfigSchema,
+  remote: RemoteConfigSchema,
+  project: external_exports.string().nullable()
 });
 var DEFAULT_STATUSLINE_CONFIG = {
   enabled: true,
@@ -6588,6 +6600,14 @@ var DEFAULT_RECALL_CONFIG = {
   tokenBudget: 500,
   minPromptLength: 12
 };
+var DEFAULT_IDENTITY_CONFIG = {
+  user: null,
+  environment: null
+};
+var DEFAULT_REMOTE_CONFIG = {
+  enabled: false,
+  url: null
+};
 var DEFAULT_CONFIG = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -6598,7 +6618,10 @@ var DEFAULT_CONFIG = {
   daemon: DEFAULT_DAEMON_CONFIG,
   backup: DEFAULT_BACKUP_CONFIG,
   sync: DEFAULT_SYNC_CONFIG,
-  recall: DEFAULT_RECALL_CONFIG
+  recall: DEFAULT_RECALL_CONFIG,
+  identity: DEFAULT_IDENTITY_CONFIG,
+  remote: DEFAULT_REMOTE_CONFIG,
+  project: null
 };
 function getDataDir() {
   if (process.env.CORTEX_DATA_DIR) {
@@ -6609,6 +6632,27 @@ function getDataDir() {
 }
 function getConfigPath() {
   return path.join(getDataDir(), "config.json");
+}
+function getProjectConfigDir(cwd) {
+  if (!cwd)
+    return null;
+  const globalDir = path.resolve(getDataDir());
+  let dir = path.resolve(cwd);
+  while (true) {
+    const candidate = path.join(dir, ".cortex");
+    if (path.resolve(candidate) !== globalDir && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir)
+      break;
+    dir = parent;
+  }
+  return null;
+}
+function getProjectConfigPath(cwd) {
+  const dir = getProjectConfigDir(cwd);
+  return dir ? path.join(dir, "config.json") : null;
 }
 function getDatabasePath() {
   return path.join(getDataDir(), "memory.db");
@@ -6632,6 +6676,20 @@ function getDaemonPort() {
   }
   return loadConfig().daemon.port;
 }
+function isRemoteModeEnabled() {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+function getRemoteUrl() {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim())
+    return null;
+  return remote.url.trim().replace(/\/+$/, "");
+}
+function getRemoteToken() {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -6651,26 +6709,40 @@ function deepMerge(target, source) {
   }
   return result;
 }
-function loadConfig() {
-  const configPath = getConfigPath();
-  if (!fs.existsSync(configPath)) {
-    return DEFAULT_CONFIG;
-  }
+function readConfigLayer(filePath) {
+  if (!filePath || !fs.existsSync(filePath))
+    return {};
   try {
-    const content = fs.readFileSync(configPath, "utf8");
-    const loaded = JSON.parse(content);
-    const merged = deepMerge(DEFAULT_CONFIG, loaded);
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function applyEnvOverrides(config) {
+  const remoteUrl = process.env.CORTEX_REMOTE_URL;
+  if (remoteUrl && remoteUrl.trim()) {
+    config = deepMerge(config, { remote: { enabled: true, url: remoteUrl.trim() } });
+  }
+  return config;
+}
+function loadConfig(cwd) {
+  try {
+    const globalLayer = readConfigLayer(getConfigPath());
+    const projectLayer = cwd ? readConfigLayer(getProjectConfigPath(cwd)) : {};
+    let merged = deepMerge(DEFAULT_CONFIG, globalLayer);
+    merged = deepMerge(merged, projectLayer);
+    merged = applyEnvOverrides(merged);
     const result = ConfigSchema.safeParse(merged);
     if (!result.success) {
       const errors = result.error.errors.map((e) => `${e.path.join(".")}: ${e.message}`);
       console.error(`Config validation errors:
   ${errors.join("\n  ")}`);
       console.error("Using default configuration");
-      return DEFAULT_CONFIG;
+      return applyEnvOverrides(DEFAULT_CONFIG);
     }
     return result.data;
   } catch {
-    return DEFAULT_CONFIG;
+    return applyEnvOverrides(DEFAULT_CONFIG);
   }
 }
 var activeConfigTempPath = null;
@@ -7085,6 +7157,12 @@ function createSchema(db, options = {}) {
     db.run(`ALTER TABLE memories ADD COLUMN origin_device TEXT`);
   } catch {
   }
+  for (const col of ["user TEXT", "environment TEXT", "category TEXT DEFAULT 'project'"]) {
+    try {
+      db.run(`ALTER TABLE memories ADD COLUMN ${col}`);
+    } catch {
+    }
+  }
   db.run(`
     CREATE TABLE IF NOT EXISTS sync_tombstones (
       content_hash TEXT PRIMARY KEY,
@@ -7095,6 +7173,9 @@ function createSchema(db, options = {}) {
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_project_id ON memories(project_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_timestamp ON memories(timestamp DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_environment ON memories(environment)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)`);
   db.run(`
     CREATE TABLE IF NOT EXISTS session_turns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7207,15 +7288,18 @@ function insertMemory(db, memory) {
     return { id: existing[0].values[0][0], isDuplicate: true };
   }
   db.run(
-    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO memories (content, content_hash, embedding, project_id, source_session, timestamp, user, environment, category)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       memory.content,
       hash,
       embeddingToBuffer(memory.embedding),
       memory.projectId,
       memory.sourceSession,
-      memory.timestamp.toISOString()
+      memory.timestamp.toISOString(),
+      memory.user ?? null,
+      memory.environment ?? null,
+      memory.category ?? "project"
     ]
   );
   const result = db.exec(`SELECT last_insert_rowid()`);
@@ -7279,7 +7363,7 @@ function deleteMemory(db, id) {
     throw error;
   }
 }
-function storeManualMemory(db, content, embedding, projectId, context) {
+function storeManualMemory(db, content, embedding, projectId, context, identity) {
   const fullContent = context ? `${content}
 
 [Context: ${context}]` : content;
@@ -7289,7 +7373,10 @@ function storeManualMemory(db, content, embedding, projectId, context) {
     embedding,
     projectId,
     sourceSession: sessionId,
-    timestamp: /* @__PURE__ */ new Date()
+    timestamp: /* @__PURE__ */ new Date(),
+    user: identity?.user ?? null,
+    environment: identity?.environment ?? null,
+    category: identity?.category ?? "project"
   });
 }
 function updateMemory(db, id, newContent, newEmbedding) {
@@ -7341,17 +7428,47 @@ function deleteProjectMemories(db, projectId) {
     throw error;
   }
 }
-function searchByVector(db, queryEmbedding, projectId, limit = 10) {
-  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
-  const params = [];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      query += ` WHERE project_id IS NULL`;
-    } else {
-      query += ` WHERE project_id = ?`;
-      params.push(projectId);
-    }
+function buildScopeClause(scope, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  const mode = scope.mode ?? "auto";
+  const user = scope.user ?? null;
+  const environment = scope.environment ?? null;
+  const project = scope.project ?? null;
+  switch (mode) {
+    case "all":
+      return { clause: "", params: [] };
+    case "global":
+      return { clause: `${a}category = 'global'`, params: [] };
+    case "user":
+      return { clause: `${a}category = 'user' AND ${a}user = ?`, params: [user] };
+    case "environment":
+      return { clause: `${a}category = 'environment' AND ${a}environment = ?`, params: [environment] };
+    case "project":
+      return {
+        clause: `(${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?`,
+        params: [project]
+      };
+    case "auto":
+    default:
+      return {
+        clause: `(${a}category = 'global' OR (${a}category = 'user' AND ${a}user = ?) OR (${a}category = 'environment' AND ${a}environment = ?) OR ((${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?))`,
+        params: [user, environment, project]
+      };
   }
+}
+function buildLegacyProjectClause(projectId, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  if (projectId === void 0)
+    return { clause: "", params: [] };
+  if (projectId === null)
+    return { clause: `${a}project_id IS NULL`, params: [] };
+  return { clause: `${a}project_id = ?`, params: [projectId] };
+}
+function searchByVector(db, queryEmbedding, projectId, limit = 10, scope) {
+  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
+  const { clause, params } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause)
+    query += ` WHERE ${clause}`;
   const result = db.exec(query, params);
   if (result.length === 0 || result[0].values.length === 0) {
     return [];
@@ -7369,20 +7486,20 @@ function searchByVector(db, queryEmbedding, projectId, limit = 10) {
   });
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
 }
-function searchByKeyword(db, query, projectId, limit = 10) {
+function searchByKeyword(db, query, projectId, limit = 10, scope) {
   const cleanQuery = query.replace(/['"]/g, "").trim();
   if (!cleanQuery) {
     return [];
   }
   if (fts5Available) {
     try {
-      return searchByFts5(db, cleanQuery, projectId, limit);
+      return searchByFts5(db, cleanQuery, projectId, limit, scope);
     } catch {
     }
   }
-  return searchByLike(db, cleanQuery, projectId, limit);
+  return searchByLike(db, cleanQuery, projectId, limit, scope);
 }
-function searchByFts5(db, query, projectId, limit = 10) {
+function searchByFts5(db, query, projectId, limit = 10, scope) {
   let sql = `
     SELECT m.id, m.content, m.project_id, m.timestamp,
            bm25(memories_fts) as rank
@@ -7391,13 +7508,10 @@ function searchByFts5(db, query, projectId, limit = 10) {
     WHERE memories_fts MATCH ?
   `;
   const params = [query];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND m.project_id IS NULL`;
-    } else {
-      sql += ` AND m.project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope, "m") : buildLegacyProjectClause(projectId, "m");
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY rank LIMIT ?`;
   params.push(limit.toString());
@@ -7414,7 +7528,7 @@ function searchByFts5(db, query, projectId, limit = 10) {
     // BM25 returns negative scores
   }));
 }
-function searchByLike(db, query, projectId, limit = 10) {
+function searchByLike(db, query, projectId, limit = 10, scope) {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) {
     return [];
@@ -7427,13 +7541,10 @@ function searchByLike(db, query, projectId, limit = 10) {
     FROM memories
     WHERE ${conditions.join(" AND ")}
   `;
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND project_id IS NULL`;
-    } else {
-      sql += ` AND project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY timestamp DESC LIMIT ?`;
   params.push(limit.toString());
@@ -7598,6 +7709,82 @@ function cosineSimilarity(a, b) {
   return dotProduct / denominator;
 }
 
+// src/identity.ts
+import * as fs3 from "fs";
+import * as os3 from "os";
+function sanitizeLabel(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+function osUsername() {
+  try {
+    const name = os3.userInfo().username;
+    if (name)
+      return sanitizeLabel(name);
+  } catch {
+  }
+  const envName = process.env.USER || process.env.USERNAME || process.env.LOGNAME;
+  return envName ? sanitizeLabel(envName) : "unknown";
+}
+function resolveUser(config) {
+  const fromEnv = process.env.CORTEX_USER;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.user;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return osUsername();
+}
+function isClaudeWeb() {
+  if (process.env.CLAUDE_CODE_WEB || process.env.CLAUDE_CODE_REMOTE)
+    return true;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === "web")
+    return true;
+  try {
+    if (fs3.existsSync("/root/.ccr/ca-bundle.crt"))
+      return true;
+  } catch {
+  }
+  return false;
+}
+function isWSL() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+    return true;
+  try {
+    const version = fs3.readFileSync("/proc/version", "utf8");
+    return /microsoft/i.test(version);
+  } catch {
+    return false;
+  }
+}
+function platformLabel() {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    default:
+      return process.platform;
+  }
+}
+function detectEnvironment(user) {
+  if (isClaudeWeb())
+    return "claude-web";
+  if (isWSL())
+    return sanitizeLabel(`${user}-wsl`);
+  return sanitizeLabel(`${user}-${platformLabel()}`);
+}
+function resolveEnvironment(config) {
+  const fromEnv = process.env.CORTEX_ENVIRONMENT;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.environment;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return detectEnvironment(resolveUser(config));
+}
+
 // src/embeddings.ts
 var MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5";
 var EMBEDDING_DIM = 768;
@@ -7644,7 +7831,7 @@ async function embedQuery(text) {
   return new Float32Array(output.data);
 }
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function embedSingleWithRetry(pipe, text, maxRetries = 3, baseDelayMs = 100) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -7730,13 +7917,14 @@ async function hybridSearch(db, query, options = {}) {
     projectScope = true,
     projectId,
     limit = 5,
-    includeAllProjects = false
+    includeAllProjects = false,
+    scope
   } = options;
   const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
   const queryEmbedding = await embedQuery(query);
   const [vectorResults, keywordResults] = await Promise.all([
-    searchByVector(db, queryEmbedding, projectFilter, limit * 2),
-    searchByKeyword(db, query, projectFilter, limit * 2)
+    searchByVector(db, queryEmbedding, projectFilter, limit * 2, scope),
+    searchByKeyword(db, query, projectFilter, limit * 2, scope)
   ]);
   const combined = combineWithRRF(vectorResults, keywordResults);
   const withRecency = applyRecencyDecay(combined);
@@ -7809,7 +7997,7 @@ function applyRecencyDecay(results) {
 }
 
 // src/archive.ts
-import * as fs3 from "fs";
+import * as fs4 from "fs";
 import * as readline from "readline";
 
 // src/logger.ts
@@ -7908,27 +8096,33 @@ var VALUABLE_PATTERNS = [
   /config|setting|option|parameter/i
 ];
 async function parseTranscript(transcriptPath, startLine = 0) {
-  const result = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0
-    }
-  };
-  if (!fs3.existsSync(transcriptPath)) {
-    return result;
+  if (!fs4.existsSync(transcriptPath)) {
+    return emptyParseResult();
   }
-  const fileStream = fs3.createReadStream(transcriptPath);
+  const fileStream = fs4.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
   });
+  return parseTranscriptLines(rl, startLine);
+}
+function parseTranscriptContent(content, startLine = 0) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+function emptyParseResult() {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 }
+  };
+}
+async function parseTranscriptLines(lines, startLine) {
+  const result = emptyParseResult();
   const toolIdMap = /* @__PURE__ */ new Map();
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines) {
     currentLine++;
     if (currentLine <= startLine) {
       result.stats.totalLines++;
@@ -8228,6 +8422,11 @@ async function appendSessionTurns(db, newMessages, projectId, sessionId) {
 async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
+  const identity = {
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
+    category: "project"
+  };
   const result = {
     archived: 0,
     skipped: 0,
@@ -8235,7 +8434,7 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   };
   const sessionId = getSessionId(transcriptPath);
   const startLine = getSessionProgress(db, sessionId);
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  const { messages, stats: parseStats } = options.transcriptContent !== void 0 ? await parseTranscriptContent(options.transcriptContent, startLine) : await parseTranscript(transcriptPath, startLine);
   if (messages.length === 0) {
     if (parseStats.totalLines > startLine) {
       updateSessionProgress(db, sessionId, parseStats.totalLines);
@@ -8299,7 +8498,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
       embedding,
       projectId,
       sourceSession: sessionId,
-      timestamp
+      timestamp,
+      ...identity
     });
     if (isDuplicate) {
       result.duplicates++;
@@ -8333,16 +8533,16 @@ function getSessionId(transcriptPath) {
 }
 
 // src/analytics.ts
-import * as fs4 from "fs";
+import * as fs5 from "fs";
 var ANALYTICS_VERSION = 1;
 var MAX_SESSIONS_TO_KEEP = 100;
 function getAnalytics() {
   const analyticsPath = getAnalyticsPath();
-  if (!fs4.existsSync(analyticsPath)) {
+  if (!fs5.existsSync(analyticsPath)) {
     return createEmptyAnalytics();
   }
   try {
-    const content = fs4.readFileSync(analyticsPath, "utf8");
+    const content = fs5.readFileSync(analyticsPath, "utf8");
     const data = JSON.parse(content);
     if (data.version !== ANALYTICS_VERSION) {
       return migrateAnalytics(data);
@@ -8358,7 +8558,7 @@ function saveAnalytics(data) {
   if (data.sessions.length > MAX_SESSIONS_TO_KEEP) {
     data.sessions = data.sessions.slice(-MAX_SESSIONS_TO_KEEP);
   }
-  fs4.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
+  fs5.writeFileSync(analyticsPath, JSON.stringify(data, null, 2), "utf8");
 }
 function createEmptyAnalytics() {
   return {
@@ -8409,7 +8609,15 @@ function getAnalyticsSummary() {
 }
 
 // src/version.ts
-var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
+var VERSION = "2.6.0" ? "2.6.0" : "0.0.0-dev";
+
+// src/types.ts
+var MEMORY_CATEGORIES = [
+  "global",
+  "user",
+  "environment",
+  "project"
+];
 
 // src/tools.ts
 var TOOLS = [
@@ -8434,6 +8642,11 @@ var TOOLS = [
         projectId: {
           type: "string",
           description: "Specific project ID to search within"
+        },
+        scope: {
+          type: "string",
+          enum: ["auto", "project", "environment", "user", "global", "all"],
+          description: "How to scope by the memory category axis (default 'auto'). 'auto' = the smart union of global + your user + this environment + this project. 'project' = only this project (tight focus). 'environment' = this machine/context across ALL projects (use when debugging an environment/tooling issue). 'user' = your cross-project preferences. 'global' = universal facts. 'all' = the entire shared brain, unfiltered."
         }
       },
       required: ["query"]
@@ -8456,6 +8669,11 @@ var TOOLS = [
         projectId: {
           type: "string",
           description: "Project ID to associate with this memory"
+        },
+        category: {
+          type: "string",
+          enum: ["global", "user", "environment", "project"],
+          description: "Generalization axis of this memory (default 'project'). 'project' = specific to this codebase; 'environment' = tied to this machine/context, useful across projects; 'user' = about the user, across everything; 'global' = universally true. Determines how future recall scopes this memory."
         }
       },
       required: ["content"]
@@ -8623,14 +8841,25 @@ var TOOLS = [
     }
   }
 ];
+var RECALL_SCOPE_MODES = [
+  "auto",
+  "project",
+  "environment",
+  "user",
+  "global",
+  "all"
+];
 async function handleRecall(db, params) {
   const { query, limit = 5, includeAllProjects = false, projectId } = params;
-  const results = await hybridSearch(db, query, {
-    projectScope: !includeAllProjects,
-    projectId,
-    includeAllProjects,
-    limit
-  });
+  const config = loadConfig();
+  const mode = params.scope && RECALL_SCOPE_MODES.includes(params.scope) ? params.scope : includeAllProjects ? "all" : "auto";
+  const scope = {
+    mode,
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    project: projectId ?? null
+  };
+  const results = await hybridSearch(db, query, { limit, scope });
   recordRecall();
   return {
     results: results.map((r) => ({
@@ -8642,11 +8871,12 @@ async function handleRecall(db, params) {
       projectId: r.projectId
     })),
     count: results.length,
-    query
+    query,
+    scope: mode
   };
 }
 async function handleRemember(db, params) {
-  const { content, context, projectId } = params;
+  const { content, context, projectId, category } = params;
   if (!content || content.trim().length === 0) {
     return {
       success: false,
@@ -8655,7 +8885,13 @@ async function handleRemember(db, params) {
   }
   const textToEmbed = context ? `${content} ${context}` : content;
   const embedding = await embedQuery(textToEmbed);
-  const result = storeManualMemory(db, content, embedding, projectId || null, context);
+  const config = loadConfig();
+  const identity = {
+    user: params.user !== void 0 ? params.user : resolveUser(config),
+    environment: params.environment !== void 0 ? params.environment : resolveEnvironment(config),
+    category: category && MEMORY_CATEGORIES.includes(category) ? category : "project"
+  };
+  const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
   if (result.isDuplicate) {
     return {
       success: true,
@@ -8698,7 +8934,11 @@ async function handleSave(db, params) {
     }
   }
   const effectiveProjectId = global ? null : projectId || null;
-  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  const identity = params.user !== void 0 || params.environment !== void 0 ? { user: params.user ?? null, environment: params.environment ?? null } : void 0;
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId, {
+    transcriptContent: params.transcriptContent,
+    identity
+  });
   return {
     success: true,
     archived: result.archived,
@@ -9037,9 +9277,25 @@ async function handleMcpRequest(db, request) {
 
 // src/daemon-client.ts
 import { spawn } from "child_process";
-import * as fs5 from "fs";
+import * as fs6 from "fs";
 function getDaemonBaseUrl() {
+  const remote = getRemoteUrl();
+  if (remote)
+    return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+function buildHeaders(hasBody) {
+  const headers = {};
+  if (hasBody)
+    headers["Content-Type"] = "application/json";
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error("Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 async function daemonFetch(path3, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
@@ -9048,7 +9304,7 @@ async function daemonFetch(path3, options = {}) {
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
       method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      headers: buildHeaders(body !== void 0),
       body: body !== void 0 ? JSON.stringify(body) : void 0,
       signal: controller.signal
     });
@@ -9076,9 +9332,11 @@ function getDaemonScriptPath() {
   return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
 }
 function spawnDaemonDetached() {
+  if (isRemoteModeEnabled())
+    return false;
   try {
     const daemonPath = getDaemonScriptPath();
-    if (!fs5.existsSync(daemonPath)) {
+    if (!fs6.existsSync(daemonPath)) {
       return false;
     }
     const child = spawn(process.execPath, [daemonPath], {
@@ -9093,6 +9351,8 @@ function spawnDaemonDetached() {
   }
 }
 async function stopDaemon() {
+  if (isRemoteModeEnabled())
+    return false;
   let requested = false;
   try {
     await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
@@ -9100,8 +9360,8 @@ async function stopDaemon() {
   } catch {
     try {
       const infoPath = getDaemonInfoPath();
-      if (fs5.existsSync(infoPath)) {
-        const info = JSON.parse(fs5.readFileSync(infoPath, "utf8"));
+      if (fs6.existsSync(infoPath)) {
+        const info = JSON.parse(fs6.readFileSync(infoPath, "utf8"));
         if (info.pid) {
           process.kill(info.pid, "SIGTERM");
           requested = true;
@@ -9113,9 +9373,18 @@ async function stopDaemon() {
   return requested;
 }
 function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function ensureDaemon(waitMs = 1e4) {
+  if (isRemoteModeEnabled()) {
+    const remoteHealth = await getDaemonHealth(Math.min(waitMs, 3e3));
+    if (remoteHealth && remoteHealth.version !== VERSION) {
+      console.error(
+        `[cortex] Remote brain version ${remoteHealth.version} differs from plugin ${VERSION}`
+      );
+    }
+    return remoteHealth !== null;
+  }
   const health = await getDaemonHealth();
   if (health && health.version === VERSION) {
     return true;
@@ -9148,8 +9417,52 @@ async function forwardMcpRequest(request, timeoutMs = 3e5) {
 }
 
 // src/mcp-server.ts
+var IDENTITY_TOOLS = /* @__PURE__ */ new Set(["cortex_remember", "cortex_save", "cortex_archive"]);
+var ARCHIVE_TOOLS = /* @__PURE__ */ new Set(["cortex_save", "cortex_archive"]);
+function augmentRemoteToolCall(request) {
+  if (request.method !== "tools/call")
+    return request;
+  const params = request.params;
+  const name = params?.name;
+  if (!name || !IDENTITY_TOOLS.has(name) && !ARCHIVE_TOOLS.has(name))
+    return request;
+  const config = loadConfig();
+  const args = { ...params?.arguments ?? {} };
+  if (IDENTITY_TOOLS.has(name)) {
+    if (args.user === void 0)
+      args.user = resolveUser(config);
+    if (args.environment === void 0)
+      args.environment = resolveEnvironment(config);
+  }
+  if (ARCHIVE_TOOLS.has(name) && args.transcriptContent === void 0) {
+    const resolved = resolveTranscriptPath(args.transcriptPath, args.projectId);
+    if (resolved && fs7.existsSync(resolved)) {
+      try {
+        args.transcriptContent = fs7.readFileSync(resolved, "utf8");
+        args.transcriptPath = resolved;
+      } catch {
+      }
+    }
+  }
+  return { ...request, params: { ...params, arguments: args } };
+}
+function resolveTranscriptPath(transcriptPath, projectId) {
+  if (transcriptPath)
+    return transcriptPath;
+  if (projectId) {
+    const session = getCurrentSession(projectId);
+    if (session)
+      return session.transcriptPath;
+  }
+  const recent = getMostRecentSession();
+  return recent ? recent.transcriptPath : null;
+}
 async function resolveMode() {
   const config = loadConfig();
+  if (isRemoteModeEnabled()) {
+    await ensureDaemon();
+    return "proxy";
+  }
   if (!config.daemon.enabled) {
     return "local";
   }
@@ -9161,13 +9474,14 @@ async function resolveMode() {
   return "local";
 }
 async function dispatchProxy(request) {
+  const outbound = isRemoteModeEnabled() ? augmentRemoteToolCall(request) : request;
   try {
-    return await forwardMcpRequest(request);
+    return await forwardMcpRequest(outbound);
   } catch {
     const recovered = await ensureDaemon();
     if (recovered) {
       try {
-        return await forwardMcpRequest(request);
+        return await forwardMcpRequest(outbound);
       } catch (retryError) {
         return {
           jsonrpc: "2.0",

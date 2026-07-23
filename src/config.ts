@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { z } from 'zod';
-import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig, SyncConfig, RecallConfig } from './types.js';
+import type { Config, StatuslineConfig, ArchiveConfig, AutosaveConfig, RestorationConfig, SetupConfig, AwarenessConfig, DaemonConfig, BackupConfig, SyncConfig, RecallConfig, IdentityConfig, RemoteConfig } from './types.js';
 
 // ============================================================================
 // Zod Schemas for Config Validation
@@ -80,6 +80,16 @@ const RecallConfigSchema = z.object({
   minPromptLength: z.number().min(0).max(1000),
 });
 
+const IdentityConfigSchema = z.object({
+  user: z.string().nullable(),
+  environment: z.string().nullable(),
+});
+
+const RemoteConfigSchema = z.object({
+  enabled: z.boolean(),
+  url: z.string().nullable(),
+});
+
 const ConfigSchema = z.object({
   statusline: StatuslineConfigSchema,
   archive: ArchiveConfigSchema,
@@ -91,6 +101,9 @@ const ConfigSchema = z.object({
   backup: BackupConfigSchema,
   sync: SyncConfigSchema,
   recall: RecallConfigSchema,
+  identity: IdentityConfigSchema,
+  remote: RemoteConfigSchema,
+  project: z.string().nullable(),
 });
 
 // ============================================================================
@@ -172,6 +185,20 @@ export const DEFAULT_RECALL_CONFIG: RecallConfig = {
   minPromptLength: 12,
 };
 
+// Identity is resolved dynamically at runtime (env > config > auto); the
+// config values are null overrides. See src/identity.ts.
+export const DEFAULT_IDENTITY_CONFIG: IdentityConfig = {
+  user: null,
+  environment: null,
+};
+
+// Remote shared-brain mode is opt-in. The auth token is never stored here -
+// it comes from the CORTEX_REMOTE_TOKEN env var at request time.
+export const DEFAULT_REMOTE_CONFIG: RemoteConfig = {
+  enabled: false,
+  url: null,
+};
+
 export const DEFAULT_CONFIG: Config = {
   statusline: DEFAULT_STATUSLINE_CONFIG,
   archive: DEFAULT_ARCHIVE_CONFIG,
@@ -183,6 +210,9 @@ export const DEFAULT_CONFIG: Config = {
   backup: DEFAULT_BACKUP_CONFIG,
   sync: DEFAULT_SYNC_CONFIG,
   recall: DEFAULT_RECALL_CONFIG,
+  identity: DEFAULT_IDENTITY_CONFIG,
+  remote: DEFAULT_REMOTE_CONFIG,
+  project: null,
 };
 
 // ============================================================================
@@ -201,10 +231,44 @@ export function getDataDir(): string {
 }
 
 /**
- * Get the configuration file path
+ * Get the global configuration file path (~/.cortex/config.json)
  */
 export function getConfigPath(): string {
   return path.join(getDataDir(), 'config.json');
+}
+
+/**
+ * Find the nearest project-root .cortex/ directory by walking up from `cwd`.
+ * Returns the .cortex directory path, or null if none is found before the
+ * filesystem root. The global data dir (~/.cortex) is never returned here -
+ * this is strictly the project-level config folder.
+ */
+export function getProjectConfigDir(cwd: string | undefined): string | null {
+  if (!cwd) return null;
+
+  const globalDir = path.resolve(getDataDir());
+  let dir = path.resolve(cwd);
+
+  // Walk up to the filesystem root.
+  while (true) {
+    const candidate = path.join(dir, '.cortex');
+    if (path.resolve(candidate) !== globalDir && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+      return candidate;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // reached root
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * Path to the project-level config file, or null if there is no project
+ * .cortex/ folder above `cwd`.
+ */
+export function getProjectConfigPath(cwd: string | undefined): string | null {
+  const dir = getProjectConfigDir(cwd);
+  return dir ? path.join(dir, 'config.json') : null;
 }
 
 /**
@@ -256,6 +320,51 @@ export function isDaemonModeEnabled(): boolean {
   return loadConfig().daemon.enabled;
 }
 
+// ============================================================================
+// Remote shared-brain resolution
+// ============================================================================
+
+/**
+ * Remote (shared-brain) mode is enabled when a URL is configured and the
+ * feature is turned on. Enabling via CORTEX_REMOTE_URL (which also flips
+ * `enabled` on, see applyEnvOverrides) is the recommended path since the
+ * companion token must come from the environment anyway.
+ */
+export function isRemoteModeEnabled(): boolean {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+
+/**
+ * Normalized remote base URL (no trailing slash), or null if remote mode is
+ * off / unconfigured.
+ */
+export function getRemoteUrl(): string | null {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim()) return null;
+  return remote.url.trim().replace(/\/+$/, '');
+}
+
+/**
+ * Bearer token for the remote brain. ALWAYS from the environment - never read
+ * from any config file - so committed configs stay secret-free.
+ */
+export function getRemoteToken(): string | null {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+
+/**
+ * True when a shared backend (localhost daemon OR remote server) should serve
+ * hook/automation data instead of this transient process opening the DB
+ * directly. Used to gate the statusline, auto-recall, auto-archive, and
+ * restore hook paths. Remote wins over daemon (both routed via daemon-client,
+ * which points at the remote URL in remote mode).
+ */
+export function isSharedBackendEnabled(): boolean {
+  return loadConfig().daemon.enabled || isRemoteModeEnabled();
+}
+
 /**
  * Ensure the data directory exists
  */
@@ -298,20 +407,53 @@ function deepMerge<T extends object>(target: T, source: Partial<T>): T {
 }
 
 /**
- * Load configuration from disk, merging with defaults
- * Validates with Zod schema, falling back to defaults on validation error
+ * Read and JSON-parse a config file, returning {} on any failure so a
+ * missing/corrupt layer never breaks the merge.
  */
-export function loadConfig(): Config {
-  const configPath = getConfigPath();
-
-  if (!fs.existsSync(configPath)) {
-    return DEFAULT_CONFIG;
-  }
-
+function readConfigLayer(filePath: string | null): Partial<Config> {
+  if (!filePath || !fs.existsSync(filePath)) return {};
   try {
-    const content = fs.readFileSync(configPath, 'utf8');
-    const loaded = JSON.parse(content);
-    const merged = deepMerge(DEFAULT_CONFIG, loaded);
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<Config>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Apply environment-variable overrides onto a merged config.
+ *
+ * Only non-secret connection settings are surfaced here so every caller of
+ * loadConfig() sees them. The auth token is deliberately NOT read into config
+ * (it stays in CORTEX_REMOTE_TOKEN and is only used at request time).
+ * Identity values (CORTEX_USER / CORTEX_ENVIRONMENT) are resolved in
+ * src/identity.ts, which also checks the env directly.
+ */
+function applyEnvOverrides(config: Config): Config {
+  const remoteUrl = process.env.CORTEX_REMOTE_URL;
+  if (remoteUrl && remoteUrl.trim()) {
+    config = deepMerge(config, { remote: { enabled: true, url: remoteUrl.trim() } } as Partial<Config>);
+  }
+  return config;
+}
+
+/**
+ * Load configuration, layering (later wins):
+ *   defaults  >  global ~/.cortex/config.json  >  project ./.cortex/config.json  >  env
+ *
+ * When `cwd` is provided the nearest project-root .cortex/config.json above it
+ * is merged in; without `cwd` only the global layer is used (backward
+ * compatible with existing call sites).
+ *
+ * Validates the merged result with Zod, falling back to defaults on error.
+ */
+export function loadConfig(cwd?: string): Config {
+  try {
+    const globalLayer = readConfigLayer(getConfigPath());
+    const projectLayer = cwd ? readConfigLayer(getProjectConfigPath(cwd)) : {};
+
+    let merged = deepMerge(DEFAULT_CONFIG, globalLayer);
+    merged = deepMerge(merged, projectLayer);
+    merged = applyEnvOverrides(merged);
 
     // Validate with Zod schema
     const result = ConfigSchema.safeParse(merged);
@@ -320,13 +462,13 @@ export function loadConfig(): Config {
       const errors = result.error.errors.map(e => `${e.path.join('.')}: ${e.message}`);
       console.error(`Config validation errors:\n  ${errors.join('\n  ')}`);
       console.error('Using default configuration');
-      return DEFAULT_CONFIG;
+      return applyEnvOverrides(DEFAULT_CONFIG);
     }
 
     return result.data;
   } catch {
     // Return defaults if loading fails
-    return DEFAULT_CONFIG;
+    return applyEnvOverrides(DEFAULT_CONFIG);
   }
 }
 
@@ -379,10 +521,13 @@ export function saveConfig(config: Config): void {
 }
 
 /**
- * Update a specific section of the configuration
+ * Update a specific section of the configuration.
+ *
+ * Reads the raw global config file only (NOT the env/project layers) so that
+ * env-derived values like CORTEX_REMOTE_URL are never persisted into the file.
  */
 export function updateConfig(updates: Partial<Config>): Config {
-  const current = loadConfig();
+  const current = deepMerge(DEFAULT_CONFIG, readConfigLayer(getConfigPath()));
   const updated = deepMerge(current, updates);
   saveConfig(updated);
   return updated;

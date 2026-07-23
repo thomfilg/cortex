@@ -10,8 +10,11 @@ import { hybridSearch } from './search.js';
 import { archiveSession } from './archive.js';
 import { embedQuery } from './embeddings.js';
 import { getAnalytics, getAnalyticsSummary, recordRemember, recordRecall } from './analytics.js';
+import { resolveUser, resolveEnvironment } from './identity.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
+import { MEMORY_CATEGORIES } from './types.js';
+import type { MemoryCategory, RecallScope, RecallScopeMode } from './types.js';
 
 // ============================================================================
 // MCP Protocol Types
@@ -72,6 +75,11 @@ export const TOOLS: Tool[] = [
           type: 'string',
           description: 'Specific project ID to search within',
         },
+        scope: {
+          type: 'string',
+          enum: ['auto', 'project', 'environment', 'user', 'global', 'all'],
+          description: "How to scope by the memory category axis (default 'auto'). 'auto' = the smart union of global + your user + this environment + this project. 'project' = only this project (tight focus). 'environment' = this machine/context across ALL projects (use when debugging an environment/tooling issue). 'user' = your cross-project preferences. 'global' = universal facts. 'all' = the entire shared brain, unfiltered.",
+        },
       },
       required: ['query'],
     },
@@ -93,6 +101,11 @@ export const TOOLS: Tool[] = [
         projectId: {
           type: 'string',
           description: 'Project ID to associate with this memory',
+        },
+        category: {
+          type: 'string',
+          enum: ['global', 'user', 'environment', 'project'],
+          description: "Generalization axis of this memory (default 'project'). 'project' = specific to this codebase; 'environment' = tied to this machine/context, useful across projects; 'user' = about the user, across everything; 'global' = universally true. Determines how future recall scopes this memory.",
         },
       },
       required: ['content'],
@@ -265,18 +278,40 @@ export const TOOLS: Tool[] = [
 // Tool Handlers
 // ============================================================================
 
+const RECALL_SCOPE_MODES: readonly RecallScopeMode[] = [
+  'auto',
+  'project',
+  'environment',
+  'user',
+  'global',
+  'all',
+];
+
 async function handleRecall(
   db: Storage,
-  params: { query: string; limit?: number; includeAllProjects?: boolean; projectId?: string }
+  params: { query: string; limit?: number; includeAllProjects?: boolean; projectId?: string; scope?: RecallScopeMode }
 ): Promise<unknown> {
   const { query, limit = 5, includeAllProjects = false, projectId } = params;
 
-  const results = await hybridSearch(db, query, {
-    projectScope: !includeAllProjects,
-    projectId,
-    includeAllProjects,
-    limit,
-  });
+  // Resolve the session's identity so category-aware scoping can match the
+  // right user/environment/project. project comes from the supplied projectId
+  // (the project_id column); user/environment resolve from env/config/auto.
+  const config = loadConfig();
+  const mode: RecallScopeMode =
+    params.scope && RECALL_SCOPE_MODES.includes(params.scope)
+      ? params.scope
+      : includeAllProjects
+        ? 'all'
+        : 'auto';
+
+  const scope: RecallScope = {
+    mode,
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    project: projectId ?? null,
+  };
+
+  const results = await hybridSearch(db, query, { limit, scope });
 
   // Track in analytics
   recordRecall();
@@ -292,14 +327,15 @@ async function handleRecall(
     })),
     count: results.length,
     query,
+    scope: mode,
   };
 }
 
 async function handleRemember(
   db: Storage,
-  params: { content: string; context?: string; projectId?: string }
+  params: { content: string; context?: string; projectId?: string; category?: MemoryCategory; user?: string | null; environment?: string | null }
 ): Promise<unknown> {
-  const { content, context, projectId } = params;
+  const { content, context, projectId, category } = params;
 
   if (!content || content.trim().length === 0) {
     return {
@@ -312,8 +348,19 @@ async function handleRemember(
   const textToEmbed = context ? `${content} ${context}` : content;
   const embedding = await embedQuery(textToEmbed);
 
+  // Resolve shared-brain identity. In remote mode the client passes its own
+  // user/environment (so the memory is attributed to the authoring machine,
+  // not the server); otherwise resolve server-side (env > config > auto).
+  // project is the supplied projectId (stored in the project_id column).
+  const config = loadConfig();
+  const identity = {
+    user: params.user !== undefined ? params.user : resolveUser(config),
+    environment: params.environment !== undefined ? params.environment : resolveEnvironment(config),
+    category: (category && MEMORY_CATEGORIES.includes(category) ? category : 'project') as MemoryCategory,
+  };
+
   // Store the memory
-  const result = storeManualMemory(db, content, embedding, projectId || null, context);
+  const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
 
   if (result.isDuplicate) {
     return {
@@ -340,7 +387,7 @@ async function handleRemember(
 
 async function handleSave(
   db: Storage,
-  params: { transcriptPath?: string; projectId?: string; global?: boolean }
+  params: { transcriptPath?: string; projectId?: string; global?: boolean; transcriptContent?: string; user?: string | null; environment?: string | null }
 ): Promise<unknown> {
   let { transcriptPath, projectId } = params;
   const { global = false } = params;
@@ -375,7 +422,18 @@ async function handleSave(
 
   const effectiveProjectId = global ? null : projectId || null;
 
-  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  // Remote path: the client uploads transcript content (the server can't read
+  // the client's disk) and its own identity (so memories are attributed to the
+  // authoring machine). Absent both, this is the unchanged local/daemon path.
+  const identity =
+    params.user !== undefined || params.environment !== undefined
+      ? { user: params.user ?? null, environment: params.environment ?? null }
+      : undefined;
+
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId, {
+    transcriptContent: params.transcriptContent,
+    identity,
+  });
 
   return {
     success: true,

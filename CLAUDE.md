@@ -291,6 +291,81 @@ push watermarks, per-peer applied seq): `~/.cortex/sync-state.json`. Schema:
 `memories.origin_device` (NULL = authored locally, pushed; peer id =
 imported, never re-pushed) and `sync_tombstones`.
 
+### Remote Shared Brain (adapter)
+
+Opt-in "shared brain": point every session (across machines, WSL, Claude on
+the web) at ONE remote Cortex server so all sessions read and write the same
+live memory store. Unlike sync (asynchronous rclone changelogs), this is a
+single source of truth — every recall reads the live shared DB. **Local mode
+stays the default**; remote is off unless configured.
+
+Three backend modes, resolved per call: `local` (default sql.js) → `daemon`
+(localhost shared daemon) → `remote` (shared server). Remote wins when
+enabled. The remote wire protocol is the daemon's existing HTTP endpoints
+(`/mcp`, `/recall`, `/restore`, `/stats`, `/health`), so remote reuses them
+verbatim over an authenticated, configurable base URL.
+
+**Client env vars:**
+- `CORTEX_REMOTE_URL` — shared brain base URL (also flips remote mode on).
+  Alternatively set `remote.enabled`/`remote.url` in config.
+- `CORTEX_REMOTE_TOKEN` — bearer token. **Env only, never persisted** — this
+  is what keeps a committed project `.cortex/config.json` secret-free.
+
+**Server env vars** (running the shared server, `node dist/daemon.js --server`):
+- `CORTEX_SERVER=1` (or `--server`) — bind `0.0.0.0` instead of loopback.
+- `CORTEX_SERVER_TOKEN` — expected bearer token; every route except `/health`
+  returns 401 without it. The server refuses to start in public mode if this
+  is unset (no unauthenticated public brain).
+
+In remote mode the client never spawns, replaces, or shuts down the server
+(it is not ours to manage); `ensureDaemon` only probes `/health` and warns on
+a version mismatch. There is deliberately NO local fallback when the remote is
+unreachable — MCP requests return a clear error rather than silently writing
+to a divergent local DB.
+
+**Identity columns** (`memories.user`, `memories.environment`,
+`memories.category`; `project` = `project_id`) attribute every memory in the
+shared brain. `user`/`project`/`environment` resolve via env > config > auto
+(see `src/identity.ts`; environment auto-detects `claude-web` / `<user>-wsl` /
+`<user>-<platform>`). `category` (`global`|`user`|`environment`|`project`,
+default `project`) is the generalization axis that scopes recall — see below.
+
+**Config layering:** `loadConfig(cwd?)` merges defaults → global
+`~/.cortex/config.json` → project-root `./.cortex/config.json` (nearest above
+cwd) → env. The project `.cortex/` folder holds config only (never the DB);
+teams commit it to share `project` + `remote.url`.
+
+**Attribution over remote:** writes must be attributed to the authoring
+machine, not the server. In remote mode the MCP stdio proxy augments
+`cortex_remember`/`cortex_save`/`cortex_archive` before forwarding — injecting
+the client's resolved `user`/`environment` — and for the archive tools it
+resolves the transcript path locally and uploads the transcript CONTENT (the
+server can't read the client's disk). The server parses the uploaded content
+(`archiveSession` accepts `transcriptContent` + an `identity` override; see
+`parseTranscriptContent`). So `cortex_save`/`cortex_archive` and
+`cortex_remember`, `cortex_recall`, restore, stats, and management tools all
+work fully over remote.
+
+**Automation hooks over remote:** the auto-recall, statusline/stats,
+session-start, session-end, pre-compact, and post-tool autosave hooks route
+to the shared backend via `isSharedBackendEnabled()` (daemon OR remote).
+`requestDaemonArchive` uploads transcript content + client identity in remote
+mode (mirroring the MCP proxy). In remote mode there is NO local-DB fallback
+for writes when the server is unreachable — the hook fails quietly rather than
+diverging the shared brain. Remote-side scheduled `backup`/`sync` remain the
+server's responsibility, not the client's.
+
+### Category-Scoped Recall
+
+`cortex_recall` accepts a `scope` (`auto`|`project`|`environment`|`user`|
+`global`|`all`, default `auto`). `auto` is the smart union: `global` memories
++ this user's + this environment's + this project's, each branch gated by the
+session's resolved identity. Explicit modes are pure slices — e.g. `scope:
+'environment'` returns this machine's memories across ALL projects (debugging
+an environment issue), `scope: 'project'` narrows to the current repo.
+`includeAllProjects: true` maps to `all` (whole brain). Legacy rows with NULL
+category behave as `project`.
+
 ## Setup Flow
 
 On first run:

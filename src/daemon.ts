@@ -25,6 +25,7 @@ import { archiveSession, formatArchiveResult, buildRestorationContext, formatRes
 import { loadConfig, getDaemonPort, getDaemonInfoPath, markAutoSaved } from './config.js';
 import { recordSavePoint } from './analytics.js';
 import { getDaemonHealth, stopDaemon } from './daemon-client.js';
+import { isServerMode, getBindHost, getServerToken, isAuthorized } from './daemon-auth.js';
 import { runBackup, isBackupDue } from './backup.js';
 import { runSync, isSyncDue, type SyncOptions } from './sync.js';
 import { vectorSearch } from './search.js';
@@ -66,12 +67,19 @@ interface ArchiveRequestBody {
   contextPercent?: number;
   markAutoSave?: boolean;
   async?: boolean;
+  /** Remote path: uploaded transcript content the server parses in place. */
+  transcriptContent?: string;
+  /** Client identity override for attribution (remote path). */
+  identity?: { user: string | null; environment: string | null };
 }
 
 async function runArchive(body: ArchiveRequestBody): Promise<{ archived: number; skipped: number; duplicates: number; formatted: string }> {
   const db = await getDb();
   const projectId = body.projectId ?? null;
-  const result = await archiveSession(db, body.transcriptPath, projectId);
+  const result = await archiveSession(db, body.transcriptPath, projectId, {
+    transcriptContent: body.transcriptContent,
+    identity: body.identity,
+  });
 
   if (body.markAutoSave) {
     // Update shared auto-save state so statuslines across sessions reflect it.
@@ -142,6 +150,13 @@ function respondJson(res: http.ServerResponse, status: number, payload: unknown)
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = new URL(req.url || '/', 'http://127.0.0.1');
   const route = `${req.method} ${url.pathname}`;
+
+  // Auth gate (public server mode only): /health stays open so the client
+  // version handshake works without credentials, but reveals no data.
+  if (route !== 'GET /health' && !isAuthorized(req.headers['authorization'])) {
+    respondJson(res, 401, { error: 'Unauthorized' });
+    return;
+  }
 
   switch (route) {
     case 'GET /health': {
@@ -464,6 +479,13 @@ async function main(): Promise<void> {
     process.on(sig, () => shutdown(0));
   }
 
+  // Refuse to expose a public server without a token: binding 0.0.0.0 with no
+  // auth would leave the shared brain open to the network.
+  if (isServerMode() && !getServerToken()) {
+    console.error('[cortex-daemon] CORTEX_SERVER mode requires CORTEX_SERVER_TOKEN to be set - refusing to start unauthenticated on a public interface');
+    process.exit(1);
+  }
+
   const port = getDaemonPort();
 
   const server = http.createServer((req, res) => {
@@ -511,14 +533,15 @@ async function main(): Promise<void> {
       }
       setTimeout(() => {
         handlingBindError = false;
-        server.listen(port, '127.0.0.1');
+        server.listen(port, getBindHost());
       }, 750);
     })();
   });
 
-  server.listen(port, '127.0.0.1', () => {
+  const bindHost = getBindHost();
+  server.listen(port, bindHost, () => {
     writeDaemonInfo(port);
-    console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    console.error(`[cortex-daemon] v${VERSION} listening on ${bindHost}:${port} (pid ${process.pid})`);
     startBackupScheduler();
     // Start loading the database in the background so first requests are fast
     void getDb().catch((error) => {
