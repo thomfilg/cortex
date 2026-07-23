@@ -7,7 +7,7 @@
 
 import { spawn } from 'child_process';
 import * as fs from 'fs';
-import { getDaemonPort, getDaemonInfoPath } from './config.js';
+import { getDaemonPort, getDaemonInfoPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken } from './config.js';
 import { VERSION } from './version.js';
 import type { MCPRequest, MCPResponse } from './tools.js';
 
@@ -42,8 +42,32 @@ export interface DaemonStats {
 // HTTP helpers
 // ============================================================================
 
+/**
+ * Base URL of the backend. In remote (shared-brain) mode this is the
+ * configured remote URL; otherwise the localhost daemon.
+ */
 export function getDaemonBaseUrl(): string {
+  const remote = getRemoteUrl();
+  if (remote) return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+
+/**
+ * Build request headers, adding a Bearer token in remote mode. The token is
+ * env-only (CORTEX_REMOTE_TOKEN); its absence in remote mode is a hard error
+ * rather than an unauthenticated request.
+ */
+function buildHeaders(hasBody: boolean): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (hasBody) headers['Content-Type'] = 'application/json';
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error('Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set');
+    }
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 /**
@@ -61,7 +85,7 @@ export async function daemonFetch(
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path}`, {
       method,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      headers: buildHeaders(body !== undefined),
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
@@ -111,6 +135,8 @@ function getDaemonScriptPath(): string {
  * the healthy same-version occupant and exits quietly.
  */
 export function spawnDaemonDetached(): boolean {
+  // Never spawn a local process for a remote backend we don't own.
+  if (isRemoteModeEnabled()) return false;
   try {
     const daemonPath = getDaemonScriptPath();
     if (!fs.existsSync(daemonPath)) {
@@ -133,6 +159,9 @@ export function spawnDaemonDetached(): boolean {
  * via the pid recorded in daemon.json.
  */
 export async function stopDaemon(): Promise<boolean> {
+  // Never shut down a shared remote server: it is not ours to stop, and its
+  // pid is on another host.
+  if (isRemoteModeEnabled()) return false;
   let requested = false;
   try {
     await daemonFetch('/shutdown', { method: 'POST', timeoutMs: 1500 });
@@ -171,6 +200,19 @@ function delay(ms: number): Promise<void> {
  * Returns true when a matching-version daemon is reachable.
  */
 export async function ensureDaemon(waitMs: number = 10000): Promise<boolean> {
+  // Remote mode: we do NOT own the server. Never spawn, replace, or shut it
+  // down - only probe reachability. A version mismatch is a warning, not a
+  // failure (the operator controls the server's version independently).
+  if (isRemoteModeEnabled()) {
+    const remoteHealth = await getDaemonHealth(Math.min(waitMs, 3000));
+    if (remoteHealth && remoteHealth.version !== VERSION) {
+      console.error(
+        `[cortex] Remote brain version ${remoteHealth.version} differs from plugin ${VERSION}`
+      );
+    }
+    return remoteHealth !== null;
+  }
+
   const health = await getDaemonHealth();
 
   if (health && health.version === VERSION) {

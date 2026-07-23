@@ -6677,6 +6677,20 @@ function getDaemonPort() {
   }
   return loadConfig().daemon.port;
 }
+function isRemoteModeEnabled() {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+function getRemoteUrl() {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim())
+    return null;
+  return remote.url.trim().replace(/\/+$/, "");
+}
+function getRemoteToken() {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -9571,7 +9585,23 @@ async function handleMcpRequest(db, request) {
 // src/daemon-client.ts
 import * as fs6 from "fs";
 function getDaemonBaseUrl() {
+  const remote = getRemoteUrl();
+  if (remote)
+    return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+function buildHeaders(hasBody) {
+  const headers = {};
+  if (hasBody)
+    headers["Content-Type"] = "application/json";
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error("Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 async function daemonFetch(path5, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
@@ -9580,7 +9610,7 @@ async function daemonFetch(path5, options = {}) {
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path5}`, {
       method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      headers: buildHeaders(body !== void 0),
       body: body !== void 0 ? JSON.stringify(body) : void 0,
       signal: controller.signal
     });
@@ -9605,6 +9635,8 @@ async function getDaemonHealth(timeoutMs = 500) {
   }
 }
 async function stopDaemon() {
+  if (isRemoteModeEnabled())
+    return false;
   let requested = false;
   try {
     await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
@@ -9623,6 +9655,35 @@ async function stopDaemon() {
     }
   }
   return requested;
+}
+
+// src/daemon-auth.ts
+import * as crypto3 from "crypto";
+function isServerMode(argv = process.argv) {
+  const flag = process.env.CORTEX_SERVER;
+  return argv.includes("--server") || flag === "1" || flag === "true";
+}
+function getBindHost(argv = process.argv) {
+  return isServerMode(argv) ? "0.0.0.0" : "127.0.0.1";
+}
+function getServerToken() {
+  const token = process.env.CORTEX_SERVER_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+function isAuthorized(authHeader) {
+  const expected = getServerToken();
+  if (!expected)
+    return true;
+  if (!authHeader)
+    return false;
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  if (!match)
+    return false;
+  const provided = Buffer.from(match[1]);
+  const expectedBuf = Buffer.from(expected);
+  if (provided.length !== expectedBuf.length)
+    return false;
+  return crypto3.timingSafeEqual(provided, expectedBuf);
 }
 
 // src/backup.ts
@@ -9812,7 +9873,7 @@ import * as fs8 from "fs";
 import * as os4 from "os";
 import * as path4 from "path";
 import * as zlib2 from "zlib";
-import * as crypto3 from "crypto";
+import * as crypto4 from "crypto";
 var CHANGELOG_SUFFIX = ".jsonl.gz";
 var MAX_LINES_PER_FILE = 5e3;
 var SEQ_PAD = 8;
@@ -9845,7 +9906,7 @@ function ensureDeviceId(state) {
   if (state.deviceId)
     return state.deviceId;
   const host = os4.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
-  state.deviceId = `${host}-${crypto3.randomBytes(3).toString("hex")}`;
+  state.deviceId = `${host}-${crypto4.randomBytes(3).toString("hex")}`;
   saveSyncState(state);
   return state.deviceId;
 }
@@ -10149,6 +10210,10 @@ function respondJson(res, status, payload) {
 async function handleRequest(req, res) {
   const url = new URL(req.url || "/", "http://127.0.0.1");
   const route = `${req.method} ${url.pathname}`;
+  if (route !== "GET /health" && !isAuthorized(req.headers["authorization"])) {
+    respondJson(res, 401, { error: "Unauthorized" });
+    return;
+  }
   switch (route) {
     case "GET /health": {
       respondJson(res, 200, {
@@ -10394,6 +10459,10 @@ async function main() {
     process.removeAllListeners(sig);
     process.on(sig, () => shutdown(0));
   }
+  if (isServerMode() && !getServerToken()) {
+    console.error("[cortex-daemon] CORTEX_SERVER mode requires CORTEX_SERVER_TOKEN to be set - refusing to start unauthenticated on a public interface");
+    process.exit(1);
+  }
   const port = getDaemonPort();
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
@@ -10429,13 +10498,14 @@ async function main() {
       }
       setTimeout(() => {
         handlingBindError = false;
-        server.listen(port, "127.0.0.1");
+        server.listen(port, getBindHost());
       }, 750);
     })();
   });
-  server.listen(port, "127.0.0.1", () => {
+  const bindHost = getBindHost();
+  server.listen(port, bindHost, () => {
     writeDaemonInfo(port);
-    console.error(`[cortex-daemon] v${VERSION} listening on 127.0.0.1:${port} (pid ${process.pid})`);
+    console.error(`[cortex-daemon] v${VERSION} listening on ${bindHost}:${port} (pid ${process.pid})`);
     startBackupScheduler();
     void getDb().catch((error) => {
       console.error(`[cortex-daemon] Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);

@@ -6776,6 +6776,20 @@ function getDaemonPort() {
   }
   return loadConfig().daemon.port;
 }
+function isRemoteModeEnabled() {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+function getRemoteUrl() {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim())
+    return null;
+  return remote.url.trim().replace(/\/+$/, "");
+}
+function getRemoteToken() {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -7269,7 +7283,23 @@ var VERSION = "2.5.0" ? "2.5.0" : "0.0.0-dev";
 
 // src/daemon-client.ts
 function getDaemonBaseUrl() {
+  const remote = getRemoteUrl();
+  if (remote)
+    return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+function buildHeaders(hasBody) {
+  const headers = {};
+  if (hasBody)
+    headers["Content-Type"] = "application/json";
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error("Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 async function daemonFetch(path6, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
@@ -7278,7 +7308,7 @@ async function daemonFetch(path6, options = {}) {
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path6}`, {
       method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      headers: buildHeaders(body !== void 0),
       body: body !== void 0 ? JSON.stringify(body) : void 0,
       signal: controller.signal
     });
@@ -7306,6 +7336,8 @@ function getDaemonScriptPath() {
   return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
 }
 function spawnDaemonDetached() {
+  if (isRemoteModeEnabled())
+    return false;
   try {
     const daemonPath = getDaemonScriptPath();
     if (!fs3.existsSync(daemonPath)) {
@@ -7323,6 +7355,8 @@ function spawnDaemonDetached() {
   }
 }
 async function stopDaemon() {
+  if (isRemoteModeEnabled())
+    return false;
   let requested = false;
   try {
     await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
@@ -7346,6 +7380,15 @@ function delay(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function ensureDaemon(waitMs = 1e4) {
+  if (isRemoteModeEnabled()) {
+    const remoteHealth = await getDaemonHealth(Math.min(waitMs, 3e3));
+    if (remoteHealth && remoteHealth.version !== VERSION) {
+      console.error(
+        `[cortex] Remote brain version ${remoteHealth.version} differs from plugin ${VERSION}`
+      );
+    }
+    return remoteHealth !== null;
+  }
   const health = await getDaemonHealth();
   if (health && health.version === VERSION) {
     return true;
@@ -7407,6 +7450,35 @@ async function requestDaemonRestore(params) {
   } catch {
     return null;
   }
+}
+
+// src/daemon-auth.ts
+import * as crypto2 from "crypto";
+function isServerMode(argv = process.argv) {
+  const flag = process.env.CORTEX_SERVER;
+  return argv.includes("--server") || flag === "1" || flag === "true";
+}
+function getBindHost(argv = process.argv) {
+  return isServerMode(argv) ? "0.0.0.0" : "127.0.0.1";
+}
+function getServerToken() {
+  const token = process.env.CORTEX_SERVER_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
+function isAuthorized(authHeader) {
+  const expected = getServerToken();
+  if (!expected)
+    return true;
+  if (!authHeader)
+    return false;
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  if (!match)
+    return false;
+  const provided = Buffer.from(match[1]);
+  const expectedBuf = Buffer.from(expected);
+  if (provided.length !== expectedBuf.length)
+    return false;
+  return crypto2.timingSafeEqual(provided, expectedBuf);
 }
 
 // src/index.ts
@@ -7474,7 +7546,7 @@ async function tryOpenNative(dbPath) {
 }
 
 // src/database.ts
-import * as crypto2 from "crypto";
+import * as crypto3 from "crypto";
 var dbInstance = null;
 var SQL = null;
 var fts5Available = false;
@@ -7900,7 +7972,7 @@ function closeDb() {
   storageKind = "wasm";
 }
 function hashContent(content) {
-  return crypto2.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
+  return crypto3.createHash("sha256").update(content.trim()).digest("hex").substring(0, 16);
 }
 function embeddingToBuffer(embedding) {
   return Buffer.from(embedding.buffer);
@@ -9681,7 +9753,7 @@ import * as fs9 from "fs";
 import * as os4 from "os";
 import * as path5 from "path";
 import * as zlib2 from "zlib";
-import * as crypto3 from "crypto";
+import * as crypto4 from "crypto";
 var CHANGELOG_SUFFIX = ".jsonl.gz";
 var MAX_LINES_PER_FILE = 5e3;
 var SEQ_PAD = 8;
@@ -9714,7 +9786,7 @@ function ensureDeviceId(state) {
   if (state.deviceId)
     return state.deviceId;
   const host = os4.hostname().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "device";
-  state.deviceId = `${host}-${crypto3.randomBytes(3).toString("hex")}`;
+  state.deviceId = `${host}-${crypto4.randomBytes(3).toString("hex")}`;
   saveSyncState(state);
   return state.deviceId;
 }
@@ -11160,17 +11232,23 @@ export {
   configureClaudeStatusline,
   deleteMemory,
   embedQuery,
+  ensureDaemon,
   ensureDeviceId,
   formatDuration,
   formatInjection,
   getBackupStatePath,
+  getBindHost,
   getContextPercent,
+  getDaemonBaseUrl,
   getInjectedIds,
   getMemory,
   getProjectConfigDir,
   getProjectConfigPath,
   getProjectId,
   getRecallStatePath,
+  getRemoteToken,
+  getRemoteUrl,
+  getServerToken,
   getStorageKind,
   getSyncStatePath,
   handleCheckDb,
@@ -11187,8 +11265,11 @@ export {
   hybridSearch,
   initDb,
   insertMemory,
+  isAuthorized,
   isBackupDue,
   isPromptEligible,
+  isRemoteModeEnabled,
+  isServerMode,
   isSyncDue,
   loadAutoSaveState,
   loadBackupState,
@@ -11211,5 +11292,7 @@ export {
   searchByVector,
   selectForInjection,
   shouldAutoSave,
+  spawnDaemonDetached,
+  stopDaemon,
   vectorSearch
 };

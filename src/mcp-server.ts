@@ -15,7 +15,7 @@
 
 import * as readline from 'readline';
 import { initDb } from './database.js';
-import { loadConfig } from './config.js';
+import { loadConfig, isRemoteModeEnabled } from './config.js';
 import { handleMcpRequest, type MCPRequest, type MCPResponse } from './tools.js';
 import { ensureDaemon, forwardMcpRequest } from './daemon-client.js';
 import type { Storage } from './storage.js';
@@ -24,6 +24,16 @@ type ServerMode = 'local' | 'proxy';
 
 async function resolveMode(): Promise<ServerMode> {
   const config = loadConfig();
+
+  // Remote (shared-brain) mode: always proxy to the remote server. We do NOT
+  // fall back to a local DB when unreachable - that would silently diverge
+  // the shared brain (local writes never reach the server). Per-request
+  // failures surface as MCP errors instead (see dispatchProxy).
+  if (isRemoteModeEnabled()) {
+    await ensureDaemon(); // probe + warn on version mismatch; never spawns remotely
+    return 'proxy';
+  }
+
   if (!config.daemon.enabled) {
     return 'local';
   }

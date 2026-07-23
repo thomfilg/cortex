@@ -6675,6 +6675,20 @@ function getDaemonPort() {
   }
   return loadConfig().daemon.port;
 }
+function isRemoteModeEnabled() {
+  const { remote } = loadConfig();
+  return !!(remote.enabled && remote.url && remote.url.trim());
+}
+function getRemoteUrl() {
+  const { remote } = loadConfig();
+  if (!remote.enabled || !remote.url || !remote.url.trim())
+    return null;
+  return remote.url.trim().replace(/\/+$/, "");
+}
+function getRemoteToken() {
+  const token = process.env.CORTEX_REMOTE_TOKEN;
+  return token && token.trim() ? token.trim() : null;
+}
 function ensureDataDir() {
   const dir = getDataDir();
   if (!fs.existsSync(dir)) {
@@ -9254,7 +9268,23 @@ async function handleMcpRequest(db, request) {
 import { spawn } from "child_process";
 import * as fs6 from "fs";
 function getDaemonBaseUrl() {
+  const remote = getRemoteUrl();
+  if (remote)
+    return remote;
   return `http://127.0.0.1:${getDaemonPort()}`;
+}
+function buildHeaders(hasBody) {
+  const headers = {};
+  if (hasBody)
+    headers["Content-Type"] = "application/json";
+  if (isRemoteModeEnabled()) {
+    const token = getRemoteToken();
+    if (!token) {
+      throw new Error("Remote mode is enabled but CORTEX_REMOTE_TOKEN is not set");
+    }
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 async function daemonFetch(path3, options = {}) {
   const { method = "GET", body, timeoutMs = 1e3 } = options;
@@ -9263,7 +9293,7 @@ async function daemonFetch(path3, options = {}) {
   try {
     const response = await fetch(`${getDaemonBaseUrl()}${path3}`, {
       method,
-      headers: body !== void 0 ? { "Content-Type": "application/json" } : void 0,
+      headers: buildHeaders(body !== void 0),
       body: body !== void 0 ? JSON.stringify(body) : void 0,
       signal: controller.signal
     });
@@ -9291,6 +9321,8 @@ function getDaemonScriptPath() {
   return decodeURIComponent(new URL("./daemon.js", import.meta.url).pathname);
 }
 function spawnDaemonDetached() {
+  if (isRemoteModeEnabled())
+    return false;
   try {
     const daemonPath = getDaemonScriptPath();
     if (!fs6.existsSync(daemonPath)) {
@@ -9308,6 +9340,8 @@ function spawnDaemonDetached() {
   }
 }
 async function stopDaemon() {
+  if (isRemoteModeEnabled())
+    return false;
   let requested = false;
   try {
     await daemonFetch("/shutdown", { method: "POST", timeoutMs: 1500 });
@@ -9331,6 +9365,15 @@ function delay(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 async function ensureDaemon(waitMs = 1e4) {
+  if (isRemoteModeEnabled()) {
+    const remoteHealth = await getDaemonHealth(Math.min(waitMs, 3e3));
+    if (remoteHealth && remoteHealth.version !== VERSION) {
+      console.error(
+        `[cortex] Remote brain version ${remoteHealth.version} differs from plugin ${VERSION}`
+      );
+    }
+    return remoteHealth !== null;
+  }
   const health = await getDaemonHealth();
   if (health && health.version === VERSION) {
     return true;
@@ -9365,6 +9408,10 @@ async function forwardMcpRequest(request, timeoutMs = 3e5) {
 // src/mcp-server.ts
 async function resolveMode() {
   const config = loadConfig();
+  if (isRemoteModeEnabled()) {
+    await ensureDaemon();
+    return "proxy";
+  }
   if (!config.daemon.enabled) {
     return "local";
   }
