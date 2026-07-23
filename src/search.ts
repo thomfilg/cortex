@@ -39,6 +39,7 @@ export async function hybridSearch(
     projectId,
     limit = 5,
     includeAllProjects = false,
+    scope,
   } = options;
 
   // Determine project filter
@@ -49,12 +50,13 @@ export async function hybridSearch(
       ? projectId
       : undefined;
 
-  // Run vector and keyword searches in parallel
+  // Run vector and keyword searches in parallel. A category-aware scope, when
+  // present, replaces the legacy project filter (searchBy* honor `scope`).
   const queryEmbedding = await embedQuery(query);
 
   const [vectorResults, keywordResults] = await Promise.all([
-    searchByVector(db, queryEmbedding, projectFilter, limit * 2),
-    searchByKeyword(db, query, projectFilter, limit * 2),
+    searchByVector(db, queryEmbedding, projectFilter, limit * 2, scope),
+    searchByKeyword(db, query, projectFilter, limit * 2, scope),
   ]);
 
   // Combine results using RRF (Reciprocal Rank Fusion)
@@ -84,6 +86,7 @@ export async function vectorSearch(
     projectId,
     limit = 5,
     includeAllProjects = false,
+    scope,
   } = options;
 
   // When projectId is null (root/global), search all projects unless explicitly scoped
@@ -94,7 +97,7 @@ export async function vectorSearch(
       : undefined;
 
   const queryEmbedding = await embedQuery(query);
-  const results = searchByVector(db, queryEmbedding, projectFilter, limit);
+  const results = searchByVector(db, queryEmbedding, projectFilter, limit, scope);
 
   return results.map((r) => ({
     id: r.id,
@@ -119,6 +122,7 @@ export async function keywordSearch(
     projectId,
     limit = 5,
     includeAllProjects = false,
+    scope,
   } = options;
 
   // When projectId is null (root/global), search all projects unless explicitly scoped
@@ -128,7 +132,7 @@ export async function keywordSearch(
       ? projectId
       : undefined;
 
-  const results = searchByKeyword(db, query, projectFilter, limit);
+  const results = searchByKeyword(db, query, projectFilter, limit, scope);
 
   return results.map((r) => ({
     id: r.id,
