@@ -9,7 +9,7 @@ import { resolveUser, resolveProject, resolveEnvironment, resolveIdentity, sanit
 import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, type DaemonStats } from './daemon-client.js';
 import { VERSION } from './version.js';
 import { spawn, execSync } from 'child_process';
-import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory, getMemory } from './database.js';
+import { initDb, getStats, getProjectStats, formatBytes, closeDb, saveDb, searchByVector, searchByKeyword, validateDatabase, isFts5Enabled, getBackupFiles, compactDatabase, getStorageKind, insertMemory, deleteMemory, getMemory, buildScopeClause } from './database.js';
 import { verifyModel, getModelName, embedQuery } from './embeddings.js';
 import { hybridSearch, vectorSearch, formatSearchResults } from './search.js';
 import { isPromptEligible, selectForInjection, formatInjection, loadRecallState, getInjectedIds, recordInjection, getRecallStatePath } from './recall-auto.js';
@@ -1712,7 +1712,10 @@ export {
   sanitizeLabel,
   getProjectConfigDir,
   getProjectConfigPath,
-  getMemory
+  getMemory,
+  buildScopeClause,
+  searchByKeyword,
+  searchByVector
 };
 
 // Run main only when executed directly (not when imported)

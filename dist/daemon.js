@@ -7507,17 +7507,47 @@ function deleteProjectMemories(db, projectId) {
     throw error;
   }
 }
-function searchByVector(db, queryEmbedding, projectId, limit = 10) {
-  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
-  const params = [];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      query += ` WHERE project_id IS NULL`;
-    } else {
-      query += ` WHERE project_id = ?`;
-      params.push(projectId);
-    }
+function buildScopeClause(scope, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  const mode = scope.mode ?? "auto";
+  const user = scope.user ?? null;
+  const environment = scope.environment ?? null;
+  const project = scope.project ?? null;
+  switch (mode) {
+    case "all":
+      return { clause: "", params: [] };
+    case "global":
+      return { clause: `${a}category = 'global'`, params: [] };
+    case "user":
+      return { clause: `${a}category = 'user' AND ${a}user = ?`, params: [user] };
+    case "environment":
+      return { clause: `${a}category = 'environment' AND ${a}environment = ?`, params: [environment] };
+    case "project":
+      return {
+        clause: `(${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?`,
+        params: [project]
+      };
+    case "auto":
+    default:
+      return {
+        clause: `(${a}category = 'global' OR (${a}category = 'user' AND ${a}user = ?) OR (${a}category = 'environment' AND ${a}environment = ?) OR ((${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?))`,
+        params: [user, environment, project]
+      };
   }
+}
+function buildLegacyProjectClause(projectId, alias = "") {
+  const a = alias ? `${alias}.` : "";
+  if (projectId === void 0)
+    return { clause: "", params: [] };
+  if (projectId === null)
+    return { clause: `${a}project_id IS NULL`, params: [] };
+  return { clause: `${a}project_id = ?`, params: [projectId] };
+}
+function searchByVector(db, queryEmbedding, projectId, limit = 10, scope) {
+  let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
+  const { clause, params } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause)
+    query += ` WHERE ${clause}`;
   const result = db.exec(query, params);
   if (result.length === 0 || result[0].values.length === 0) {
     return [];
@@ -7535,20 +7565,20 @@ function searchByVector(db, queryEmbedding, projectId, limit = 10) {
   });
   return scored.sort((a, b) => b.score - a.score).slice(0, limit);
 }
-function searchByKeyword(db, query, projectId, limit = 10) {
+function searchByKeyword(db, query, projectId, limit = 10, scope) {
   const cleanQuery = query.replace(/['"]/g, "").trim();
   if (!cleanQuery) {
     return [];
   }
   if (fts5Available) {
     try {
-      return searchByFts5(db, cleanQuery, projectId, limit);
+      return searchByFts5(db, cleanQuery, projectId, limit, scope);
     } catch {
     }
   }
-  return searchByLike(db, cleanQuery, projectId, limit);
+  return searchByLike(db, cleanQuery, projectId, limit, scope);
 }
-function searchByFts5(db, query, projectId, limit = 10) {
+function searchByFts5(db, query, projectId, limit = 10, scope) {
   let sql = `
     SELECT m.id, m.content, m.project_id, m.timestamp,
            bm25(memories_fts) as rank
@@ -7557,13 +7587,10 @@ function searchByFts5(db, query, projectId, limit = 10) {
     WHERE memories_fts MATCH ?
   `;
   const params = [query];
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND m.project_id IS NULL`;
-    } else {
-      sql += ` AND m.project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope, "m") : buildLegacyProjectClause(projectId, "m");
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY rank LIMIT ?`;
   params.push(limit.toString());
@@ -7580,7 +7607,7 @@ function searchByFts5(db, query, projectId, limit = 10) {
     // BM25 returns negative scores
   }));
 }
-function searchByLike(db, query, projectId, limit = 10) {
+function searchByLike(db, query, projectId, limit = 10, scope) {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) {
     return [];
@@ -7593,13 +7620,10 @@ function searchByLike(db, query, projectId, limit = 10) {
     FROM memories
     WHERE ${conditions.join(" AND ")}
   `;
-  if (projectId !== void 0) {
-    if (projectId === null) {
-      sql += ` AND project_id IS NULL`;
-    } else {
-      sql += ` AND project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope ? buildScopeClause(scope) : buildLegacyProjectClause(projectId);
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
   sql += ` ORDER BY timestamp DESC LIMIT ?`;
   params.push(limit.toString());
@@ -7963,13 +7987,14 @@ async function hybridSearch(db, query, options = {}) {
     projectScope = true,
     projectId,
     limit = 5,
-    includeAllProjects = false
+    includeAllProjects = false,
+    scope
   } = options;
   const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
   const queryEmbedding = await embedQuery(query);
   const [vectorResults, keywordResults] = await Promise.all([
-    searchByVector(db, queryEmbedding, projectFilter, limit * 2),
-    searchByKeyword(db, query, projectFilter, limit * 2)
+    searchByVector(db, queryEmbedding, projectFilter, limit * 2, scope),
+    searchByKeyword(db, query, projectFilter, limit * 2, scope)
   ]);
   const combined = combineWithRRF(vectorResults, keywordResults);
   const withRecency = applyRecencyDecay(combined);
@@ -7981,11 +8006,12 @@ async function vectorSearch(db, query, options = {}) {
     projectScope = true,
     projectId,
     limit = 5,
-    includeAllProjects = false
+    includeAllProjects = false,
+    scope
   } = options;
   const projectFilter = includeAllProjects ? void 0 : projectScope && projectId !== null ? projectId : void 0;
   const queryEmbedding = await embedQuery(query);
-  const results = searchByVector(db, queryEmbedding, projectFilter, limit);
+  const results = searchByVector(db, queryEmbedding, projectFilter, limit, scope);
   return results.map((r) => ({
     id: r.id,
     score: r.score,
@@ -8913,6 +8939,11 @@ var TOOLS = [
         projectId: {
           type: "string",
           description: "Specific project ID to search within"
+        },
+        scope: {
+          type: "string",
+          enum: ["auto", "project", "environment", "user", "global", "all"],
+          description: "How to scope by the memory category axis (default 'auto'). 'auto' = the smart union of global + your user + this environment + this project. 'project' = only this project (tight focus). 'environment' = this machine/context across ALL projects (use when debugging an environment/tooling issue). 'user' = your cross-project preferences. 'global' = universal facts. 'all' = the entire shared brain, unfiltered."
         }
       },
       required: ["query"]
@@ -9107,14 +9138,25 @@ var TOOLS = [
     }
   }
 ];
+var RECALL_SCOPE_MODES = [
+  "auto",
+  "project",
+  "environment",
+  "user",
+  "global",
+  "all"
+];
 async function handleRecall(db, params) {
   const { query, limit = 5, includeAllProjects = false, projectId } = params;
-  const results = await hybridSearch(db, query, {
-    projectScope: !includeAllProjects,
-    projectId,
-    includeAllProjects,
-    limit
-  });
+  const config = loadConfig();
+  const mode = params.scope && RECALL_SCOPE_MODES.includes(params.scope) ? params.scope : includeAllProjects ? "all" : "auto";
+  const scope = {
+    mode,
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    project: projectId ?? null
+  };
+  const results = await hybridSearch(db, query, { limit, scope });
   recordRecall();
   return {
     results: results.map((r) => ({
@@ -9126,7 +9168,8 @@ async function handleRecall(db, params) {
       projectId: r.projectId
     })),
     count: results.length,
-    query
+    query,
+    scope: mode
   };
 }
 async function handleRemember(db, params) {

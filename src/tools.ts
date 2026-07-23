@@ -14,7 +14,7 @@ import { resolveUser, resolveEnvironment } from './identity.js';
 import { VERSION } from './version.js';
 import type { Storage } from './storage.js';
 import { MEMORY_CATEGORIES } from './types.js';
-import type { MemoryCategory } from './types.js';
+import type { MemoryCategory, RecallScope, RecallScopeMode } from './types.js';
 
 // ============================================================================
 // MCP Protocol Types
@@ -74,6 +74,11 @@ export const TOOLS: Tool[] = [
         projectId: {
           type: 'string',
           description: 'Specific project ID to search within',
+        },
+        scope: {
+          type: 'string',
+          enum: ['auto', 'project', 'environment', 'user', 'global', 'all'],
+          description: "How to scope by the memory category axis (default 'auto'). 'auto' = the smart union of global + your user + this environment + this project. 'project' = only this project (tight focus). 'environment' = this machine/context across ALL projects (use when debugging an environment/tooling issue). 'user' = your cross-project preferences. 'global' = universal facts. 'all' = the entire shared brain, unfiltered.",
         },
       },
       required: ['query'],
@@ -273,18 +278,40 @@ export const TOOLS: Tool[] = [
 // Tool Handlers
 // ============================================================================
 
+const RECALL_SCOPE_MODES: readonly RecallScopeMode[] = [
+  'auto',
+  'project',
+  'environment',
+  'user',
+  'global',
+  'all',
+];
+
 async function handleRecall(
   db: Storage,
-  params: { query: string; limit?: number; includeAllProjects?: boolean; projectId?: string }
+  params: { query: string; limit?: number; includeAllProjects?: boolean; projectId?: string; scope?: RecallScopeMode }
 ): Promise<unknown> {
   const { query, limit = 5, includeAllProjects = false, projectId } = params;
 
-  const results = await hybridSearch(db, query, {
-    projectScope: !includeAllProjects,
-    projectId,
-    includeAllProjects,
-    limit,
-  });
+  // Resolve the session's identity so category-aware scoping can match the
+  // right user/environment/project. project comes from the supplied projectId
+  // (the project_id column); user/environment resolve from env/config/auto.
+  const config = loadConfig();
+  const mode: RecallScopeMode =
+    params.scope && RECALL_SCOPE_MODES.includes(params.scope)
+      ? params.scope
+      : includeAllProjects
+        ? 'all'
+        : 'auto';
+
+  const scope: RecallScope = {
+    mode,
+    user: resolveUser(config),
+    environment: resolveEnvironment(config),
+    project: projectId ?? null,
+  };
+
+  const results = await hybridSearch(db, query, { limit, scope });
 
   // Track in analytics
   recordRecall();
@@ -300,6 +327,7 @@ async function handleRecall(
     })),
     count: results.length,
     query,
+    scope: mode,
   };
 }
 

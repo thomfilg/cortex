@@ -99,11 +99,44 @@ export interface SearchResult {
   projectId: string | null;
 }
 
+/**
+ * How recall scopes results by the `category` generalization axis.
+ * - auto: the smart union - global + this user's + this environment's + this
+ *   project's memories (each branch gated by the matching identity value).
+ * - project | environment | user | global: a single pure slice.
+ * - all: no category/identity filter (the whole shared brain).
+ */
+export type RecallScopeMode =
+  | 'auto'
+  | 'project'
+  | 'environment'
+  | 'user'
+  | 'global'
+  | 'all';
+
+/**
+ * Identity values that a scope filter matches against. Missing values simply
+ * make the corresponding branch match nothing (never a SQL error).
+ */
+export interface RecallScope {
+  mode?: RecallScopeMode;
+  user?: string | null;
+  environment?: string | null;
+  /** Matched against the project_id column. */
+  project?: string | null;
+}
+
 export interface SearchOptions {
   projectScope?: boolean;
   projectId?: string;
   limit?: number;
   includeAllProjects?: boolean;
+  /**
+   * Category-aware scope. When provided it REPLACES the legacy projectId
+   * filter. When omitted, the legacy projectId/projectScope behavior is used
+   * unchanged (backward compatible).
+   */
+  scope?: RecallScope;
 }
 
 // ============================================================================

@@ -10,7 +10,7 @@ import initSqlJs, { Database as SqlJsDatabase, SqlValue } from 'sql.js';
 import { getDatabasePath, ensureDataDir, getBackupsDir, ensureBackupsDir, cleanupActiveConfigTempFile } from './config.js';
 import * as path from 'path';
 import { tryOpenNative, NativeStorage, type Storage, type StorageKind } from './storage.js';
-import type { Memory, MemoryInput, DbStats, SessionTurn, TurnInput, MemoryCategory } from './types.js';
+import type { Memory, MemoryInput, DbStats, SessionTurn, TurnInput, MemoryCategory, RecallScope, RecallScopeMode } from './types.js';
 import * as crypto from 'crypto';
 
 // ============================================================================
@@ -954,26 +954,81 @@ export function deleteProjectMemories(db: Storage, projectId: string): number {
 // ============================================================================
 
 /**
+ * Build a category-aware WHERE fragment (without the leading WHERE) plus its
+ * bound params from a RecallScope. See RecallScopeMode for the semantics.
+ *
+ * `alias` is the optional table alias prefix (e.g. 'm' for joined queries).
+ * Null identity values yield `col = NULL`, which SQLite treats as never-true,
+ * so a missing user/environment simply prunes that branch - never an error.
+ */
+export function buildScopeClause(
+  scope: RecallScope,
+  alias: string = ''
+): { clause: string; params: (string | null)[] } {
+  const a = alias ? `${alias}.` : '';
+  const mode: RecallScopeMode = scope.mode ?? 'auto';
+  const user = scope.user ?? null;
+  const environment = scope.environment ?? null;
+  const project = scope.project ?? null;
+
+  switch (mode) {
+    case 'all':
+      return { clause: '', params: [] };
+    case 'global':
+      return { clause: `${a}category = 'global'`, params: [] };
+    case 'user':
+      return { clause: `${a}category = 'user' AND ${a}user = ?`, params: [user] };
+    case 'environment':
+      return { clause: `${a}category = 'environment' AND ${a}environment = ?`, params: [environment] };
+    case 'project':
+      return {
+        clause: `(${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?`,
+        params: [project],
+      };
+    case 'auto':
+    default:
+      return {
+        clause:
+          `(${a}category = 'global'` +
+          ` OR (${a}category = 'user' AND ${a}user = ?)` +
+          ` OR (${a}category = 'environment' AND ${a}environment = ?)` +
+          ` OR ((${a}category = 'project' OR ${a}category IS NULL) AND ${a}project_id = ?))`,
+        params: [user, environment, project],
+      };
+  }
+}
+
+/**
+ * Build the legacy project-only WHERE fragment (backward-compatible path used
+ * when no RecallScope is supplied). undefined projectId = no filter.
+ */
+function buildLegacyProjectClause(
+  projectId: string | null | undefined,
+  alias: string = ''
+): { clause: string; params: (string | null)[] } {
+  const a = alias ? `${alias}.` : '';
+  if (projectId === undefined) return { clause: '', params: [] };
+  if (projectId === null) return { clause: `${a}project_id IS NULL`, params: [] };
+  return { clause: `${a}project_id = ?`, params: [projectId] };
+}
+
+/**
  * Search memories by vector similarity (cosine distance)
  */
 export function searchByVector(
   db: Storage,
   queryEmbedding: Float32Array,
   projectId?: string | null,
-  limit: number = 10
+  limit: number = 10,
+  scope?: RecallScope
 ): Array<{ id: number; content: string; score: number; timestamp: Date; projectId: string | null }> {
-  // Get all memories (with optional project filter)
+  // Get all memories. A RecallScope, when present, replaces the legacy
+  // projectId filter with category-aware scoping.
   let query = `SELECT id, content, embedding, project_id, timestamp FROM memories`;
-  const params: (string | null)[] = [];
-
-  if (projectId !== undefined) {
-    if (projectId === null) {
-      query += ` WHERE project_id IS NULL`;
-    } else {
-      query += ` WHERE project_id = ?`;
-      params.push(projectId);
-    }
-  }
+  const { clause, params } = scope
+    ? buildScopeClause(scope)
+    : buildLegacyProjectClause(projectId);
+  if (clause) query += ` WHERE ${clause}`;
 
   const result = db.exec(query, params);
 
@@ -1008,7 +1063,8 @@ export function searchByKeyword(
   db: Storage,
   query: string,
   projectId?: string | null,
-  limit: number = 10
+  limit: number = 10,
+  scope?: RecallScope
 ): Array<{ id: number; content: string; score: number; timestamp: Date; projectId: string | null }> {
   const cleanQuery = query.replace(/['"]/g, '').trim();
 
@@ -1019,14 +1075,14 @@ export function searchByKeyword(
   // Try FTS5 first if available
   if (fts5Available) {
     try {
-      return searchByFts5(db, cleanQuery, projectId, limit);
+      return searchByFts5(db, cleanQuery, projectId, limit, scope);
     } catch {
       // Fall through to LIKE search
     }
   }
 
   // Fallback to LIKE search
-  return searchByLike(db, cleanQuery, projectId, limit);
+  return searchByLike(db, cleanQuery, projectId, limit, scope);
 }
 
 /**
@@ -1036,7 +1092,8 @@ function searchByFts5(
   db: Storage,
   query: string,
   projectId?: string | null,
-  limit: number = 10
+  limit: number = 10,
+  scope?: RecallScope
 ): Array<{ id: number; content: string; score: number; timestamp: Date; projectId: string | null }> {
   let sql = `
     SELECT m.id, m.content, m.project_id, m.timestamp,
@@ -1048,13 +1105,12 @@ function searchByFts5(
 
   const params: (string | null)[] = [query];
 
-  if (projectId !== undefined) {
-    if (projectId === null) {
-      sql += ` AND m.project_id IS NULL`;
-    } else {
-      sql += ` AND m.project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope
+    ? buildScopeClause(scope, 'm')
+    : buildLegacyProjectClause(projectId, 'm');
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
 
   sql += ` ORDER BY rank LIMIT ?`;
@@ -1082,7 +1138,8 @@ function searchByLike(
   db: Storage,
   query: string,
   projectId?: string | null,
-  limit: number = 10
+  limit: number = 10,
+  scope?: RecallScope
 ): Array<{ id: number; content: string; score: number; timestamp: Date; projectId: string | null }> {
   // Split query into words for multi-word search
   const words = query.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1102,13 +1159,12 @@ function searchByLike(
     WHERE ${conditions.join(' AND ')}
   `;
 
-  if (projectId !== undefined) {
-    if (projectId === null) {
-      sql += ` AND project_id IS NULL`;
-    } else {
-      sql += ` AND project_id = ?`;
-      params.push(projectId);
-    }
+  const { clause, params: scopeParams } = scope
+    ? buildScopeClause(scope)
+    : buildLegacyProjectClause(projectId);
+  if (clause) {
+    sql += ` AND ${clause}`;
+    params.push(...scopeParams);
   }
 
   sql += ` ORDER BY timestamp DESC LIMIT ?`;
