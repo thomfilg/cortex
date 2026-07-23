@@ -7,7 +7,8 @@
 
 import { spawn } from 'child_process';
 import * as fs from 'fs';
-import { getDaemonPort, getDaemonInfoPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken } from './config.js';
+import { getDaemonPort, getDaemonInfoPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken, loadConfig } from './config.js';
+import { resolveUser, resolveEnvironment } from './identity.js';
 import { VERSION } from './version.js';
 import type { MCPRequest, MCPResponse } from './tools.js';
 
@@ -287,8 +288,25 @@ export async function requestDaemonArchive(params: {
   timeoutMs?: number;
 }): Promise<{ archived: number; skipped: number; duplicates: number; formatted?: string } | null> {
   const { timeoutMs = params.async ? 1500 : 55000, ...body } = params;
+
+  // Remote mode: the server can't read this machine's transcript, so upload
+  // its content and attribute the memories to this client (not the server).
+  // Mirrors the MCP stdio proxy's augmentation for cortex_save/archive.
+  const outbound: Record<string, unknown> = { ...body };
+  if (isRemoteModeEnabled()) {
+    try {
+      if (fs.existsSync(body.transcriptPath)) {
+        outbound.transcriptContent = fs.readFileSync(body.transcriptPath, 'utf8');
+      }
+    } catch {
+      // If unreadable, forward without content; the server reports 0 archived.
+    }
+    const config = loadConfig();
+    outbound.identity = { user: resolveUser(config), environment: resolveEnvironment(config) };
+  }
+
   try {
-    const result = await daemonFetch('/archive', { method: 'POST', body, timeoutMs });
+    const result = await daemonFetch('/archive', { method: 'POST', body: outbound, timeoutMs });
     return result as { archived: number; skipped: number; duplicates: number; formatted?: string };
   } catch {
     return null;

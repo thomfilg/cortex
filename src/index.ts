@@ -4,7 +4,7 @@
  */
 
 import { readStdin, readStdinWithResult, getProjectId, getContextPercent, formatDuration, formatCompactNumber } from './stdin.js';
-import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, getProjectConfigDir, getProjectConfigPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken, type ConfigPreset } from './config.js';
+import { loadConfig, updateConfig, ensureDataDir, applyPreset, getDataDir, isSetupComplete, markSetupComplete, saveCurrentSession, shouldAutoSave, markAutoSaved, resetAutoSaveState, loadAutoSaveState, isAutoSaveStateCurrentSession, wasRecentlySaved, isSaving, setSavingState, isShowingSavingIndicator, getLastSaveTimeAgo, configureClaudeStatusline, buildCortexStatuslineCommand, getChainedStatuslineCommand, getProjectConfigDir, getProjectConfigPath, isRemoteModeEnabled, getRemoteUrl, getRemoteToken, isSharedBackendEnabled, type ConfigPreset } from './config.js';
 import { resolveUser, resolveProject, resolveEnvironment, resolveIdentity, sanitizeLabel } from './identity.js';
 import { ensureDaemon, spawnDaemonDetached, stopDaemon, getDaemonHealth, getDaemonStats, requestDaemonArchive, requestDaemonRestore, requestDaemonRecall, daemonFetch, getDaemonBaseUrl, type DaemonStats } from './daemon-client.js';
 import { isServerMode, getBindHost, getServerToken, isAuthorized } from './daemon-auth.js';
@@ -246,11 +246,13 @@ function executeChainedStatusline(): string | null {
 async function handleStatusline() {
   const stdin = await readStdin();
   const config = loadConfig();
-  const daemonMode = config.daemon.enabled;
+  // Shared backend = localhost daemon OR remote server. Either way the
+  // statusline asks the shared backend instead of opening the DB here.
+  const daemonMode = isSharedBackendEnabled();
 
-  // Daemon mode: the statusline never touches the database directly -
-  // it asks the shared daemon and spawns it if it's not running.
-  // Classic mode: initialize database locally, exactly as before.
+  // Shared-backend mode: the statusline never touches the database directly -
+  // it asks the shared daemon/server (spawning a local daemon if needed; in
+  // remote mode spawn is a no-op). Classic mode: initialize database locally.
   let remoteStats: DaemonStats | null = null;
   let db: Awaited<ReturnType<typeof initDb>> | null = null;
 
@@ -498,12 +500,12 @@ async function handleSessionStart() {
   // Start analytics session
   startSession(projectId);
 
-  // Daemon mode: bring the shared daemon up (spawning/replacing as needed)
-  // and render from it - this process never loads the database
-  if (config.daemon.enabled) {
+  // Shared-backend mode (daemon or remote): render from the shared backend -
+  // this process never loads the database. If unreachable, fall through to the
+  // classic local path (session start is read-only, so no divergence risk).
+  if (isSharedBackendEnabled()) {
     const handled = await sessionStartViaDaemon(config, projectId);
     if (handled) return;
-    // Daemon unavailable: fall through to the classic local path
   }
 
   // Initialize database
@@ -615,8 +617,10 @@ async function handleSessionEnd() {
   // Always save before session ends
   console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.cyan}Saving session before exit...`);
 
-  // Daemon mode: archive through the shared daemon (hook timeout is 30s)
-  if (config.daemon.enabled && (await ensureDaemon(5000))) {
+  // Shared-backend mode: archive through the shared daemon/server (hook
+  // timeout is 30s). In remote mode the transcript content is uploaded and
+  // attributed to this client by requestDaemonArchive.
+  if (isSharedBackendEnabled() && (await ensureDaemon(5000))) {
     const result = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
       projectId,
@@ -628,7 +632,13 @@ async function handleSessionEnd() {
       }
       return;
     }
-    // Daemon call failed: fall through to local archive
+    // Shared-backend call failed. In remote mode do NOT fall through to a
+    // local archive: it would write to a divergent local DB. Fail quietly.
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not saved`);
+      return;
+    }
+    // Daemon mode: the local DB is the same file - fall through to local.
   }
 
   const db = await initDb();
@@ -655,9 +665,10 @@ async function handlePostTool() {
 
     // Check if we should save based on step increase
     if (shouldAutoSave(currentPercent, stdin.transcript_path)) {
-      if (config.daemon.enabled) {
-        // Daemon mode: queue on the shared daemon (fast 202 ack) - this
-        // hook has a 2s timeout and must never load the DB or model
+      if (isSharedBackendEnabled()) {
+        // Shared-backend mode: queue on the shared daemon/server (fast 202
+        // ack) - this hook has a 2s timeout and must never load the DB or
+        // model. In remote mode requestDaemonArchive uploads the content.
         setSavingState(true, stdin.transcript_path);
         const queued = await requestDaemonArchive({
           transcriptPath: stdin.transcript_path,
@@ -772,7 +783,7 @@ async function handlePreCompact() {
 
   // Daemon mode: archive + restoration through the shared daemon
   // (hook timeout is 60s; fall back to local mode if the daemon fails)
-  if (config.daemon.enabled && (await ensureDaemon(5000))) {
+  if (isSharedBackendEnabled() && (await ensureDaemon(5000))) {
     console.log(`${ANSI.brick}Ψ${ANSI.reset} Auto-archiving before compact...`);
     const result = await requestDaemonArchive({
       transcriptPath: stdin.transcript_path,
@@ -807,7 +818,13 @@ async function handlePreCompact() {
       }
       return;
     }
-    // Daemon call failed: fall through to local archive
+    // Shared-backend call failed. In remote mode do NOT fall through to a
+    // local archive (it would diverge the shared brain). Fail quietly.
+    if (isRemoteModeEnabled()) {
+      console.log(`${ANSI.brick}Ψ${ANSI.reset} ${ANSI.dim}Remote brain unreachable; not archived`);
+      return;
+    }
+    // Daemon mode: the local DB is the same file - fall through to local.
   }
 
   const db = await initDb();
@@ -971,9 +988,11 @@ async function handleAutoRecall() {
   if (results === null) {
     // In daemon mode, never open the DB locally as a fallback: the daemon
     // may hold it in native/WAL form, which sql.js would read stale (and
-    // its close-time write-back could lose WAL contents). Skip instead.
-    if (config.daemon.enabled) {
-      debugLog('handleAutoRecall', 'Daemon unreachable or missing /recall; skipping (daemon mode)');
+    // its close-time write-back could lose WAL contents). In remote mode
+    // there is no local DB to fall back to (and doing so would diverge the
+    // shared brain). Skip silently in both.
+    if (config.daemon.enabled || isRemoteModeEnabled()) {
+      debugLog('handleAutoRecall', 'Shared backend unreachable or missing /recall; skipping');
       return;
     }
     try {
@@ -1730,7 +1749,9 @@ export {
   stopDaemon,
   ensureDaemon,
   parseTranscript,
-  parseTranscriptContent
+  parseTranscriptContent,
+  isSharedBackendEnabled,
+  requestDaemonArchive
 };
 
 // Run main only when executed directly (not when imported)

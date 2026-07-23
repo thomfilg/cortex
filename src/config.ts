@@ -355,6 +355,17 @@ export function getRemoteToken(): string | null {
 }
 
 /**
+ * True when a shared backend (localhost daemon OR remote server) should serve
+ * hook/automation data instead of this transient process opening the DB
+ * directly. Used to gate the statusline, auto-recall, auto-archive, and
+ * restore hook paths. Remote wins over daemon (both routed via daemon-client,
+ * which points at the remote URL in remote mode).
+ */
+export function isSharedBackendEnabled(): boolean {
+  return loadConfig().daemon.enabled || isRemoteModeEnabled();
+}
+
+/**
  * Ensure the data directory exists
  */
 export function ensureDataDir(): void {
