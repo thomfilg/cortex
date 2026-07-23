@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.6.0
+
+### Features
+
+- **Remote shared brain: point every session at one live memory store.** A new
+  opt-in `remote` backend mode lets sessions across machines, WSL, and Claude
+  on the web read and write the same Cortex server, so recall reflects the
+  whole team/fleet in real time. **Local mode stays the default** - remote is
+  off unless configured. Three backend modes resolve per call: `local`
+  (sql.js) → `daemon` (localhost) → `remote` (shared server). The remote wire
+  protocol reuses the daemon's existing HTTP endpoints (`/mcp`, `/recall`,
+  `/restore`, `/stats`, `/archive`, `/health`) over an authenticated,
+  configurable base URL. Enable with `CORTEX_REMOTE_URL`; the bearer token
+  comes from `CORTEX_REMOTE_TOKEN` (**env only, never persisted**). Run the
+  shared server with `node dist/daemon.js --server` (or `CORTEX_SERVER=1`),
+  which binds `0.0.0.0` and enforces `CORTEX_SERVER_TOKEN` on every route
+  except `/health` (it refuses to start public without a token). In remote
+  mode the client never spawns/replaces/stops the server, and there is no
+  local-DB write fallback when the server is unreachable (writes fail quietly
+  rather than diverging the shared brain).
+
+- **Identity columns: memories know who/where they came from.** Every memory is
+  stamped with `user`, `environment`, and `category` (plus `project` =
+  `project_id`). `user`/`project`/`environment` resolve via env > config >
+  auto; `environment` auto-detects `claude-web` / `<user>-wsl` /
+  `<user>-<platform>`. In remote mode the MCP stdio proxy and the auto-archive
+  hooks attribute writes to the authoring machine (not the server) - injecting
+  the client's identity and, for archive tools, uploading the transcript
+  content the server can't read off the client's disk.
+
+- **Category-scoped recall.** `cortex_recall` accepts a `scope`
+  (`auto`|`project`|`environment`|`user`|`global`|`all`, default `auto`).
+  `auto` is the smart union - global memories + this user's + this
+  environment's + this project's, each branch gated by the session's resolved
+  identity. Explicit modes are pure slices: `scope: 'environment'` returns
+  this machine's memories across all projects (debugging an environment
+  issue), `scope: 'project'` narrows to the current repo. Legacy rows with
+  NULL category behave as `project`.
+
+- **Project-root `.cortex/` config layering.** `loadConfig` now merges
+  defaults → global `~/.cortex/config.json` → project-root
+  `./.cortex/config.json` (nearest above cwd) → env. The project `.cortex/`
+  folder holds config only (never the DB), so teams can commit `project` +
+  `remote.url` to share a brain - and it stays secret-free because the token
+  is env-only.
+
+- **Automation hooks over the shared backend.** Auto-recall, statusline/stats,
+  session-start, session-end, pre-compact, and post-tool autosave route to the
+  shared backend (daemon OR remote) via `isSharedBackendEnabled()`, so the
+  shared brain stays live on every prompt.
+
 ## 2.5.0
 
 ### Features
