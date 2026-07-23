@@ -333,7 +333,7 @@ async function handleRecall(
 
 async function handleRemember(
   db: Storage,
-  params: { content: string; context?: string; projectId?: string; category?: MemoryCategory }
+  params: { content: string; context?: string; projectId?: string; category?: MemoryCategory; user?: string | null; environment?: string | null }
 ): Promise<unknown> {
   const { content, context, projectId, category } = params;
 
@@ -348,12 +348,14 @@ async function handleRemember(
   const textToEmbed = context ? `${content} ${context}` : content;
   const embedding = await embedQuery(textToEmbed);
 
-  // Resolve shared-brain identity (env > config > auto). project is the
-  // supplied projectId (stored in the project_id column).
+  // Resolve shared-brain identity. In remote mode the client passes its own
+  // user/environment (so the memory is attributed to the authoring machine,
+  // not the server); otherwise resolve server-side (env > config > auto).
+  // project is the supplied projectId (stored in the project_id column).
   const config = loadConfig();
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: params.user !== undefined ? params.user : resolveUser(config),
+    environment: params.environment !== undefined ? params.environment : resolveEnvironment(config),
     category: (category && MEMORY_CATEGORIES.includes(category) ? category : 'project') as MemoryCategory,
   };
 
@@ -385,7 +387,7 @@ async function handleRemember(
 
 async function handleSave(
   db: Storage,
-  params: { transcriptPath?: string; projectId?: string; global?: boolean }
+  params: { transcriptPath?: string; projectId?: string; global?: boolean; transcriptContent?: string; user?: string | null; environment?: string | null }
 ): Promise<unknown> {
   let { transcriptPath, projectId } = params;
   const { global = false } = params;
@@ -420,7 +422,18 @@ async function handleSave(
 
   const effectiveProjectId = global ? null : projectId || null;
 
-  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  // Remote path: the client uploads transcript content (the server can't read
+  // the client's disk) and its own identity (so memories are attributed to the
+  // authoring machine). Absent both, this is the unchanged local/daemon path.
+  const identity =
+    params.user !== undefined || params.environment !== undefined
+      ? { user: params.user ?? null, environment: params.environment ?? null }
+      : undefined;
+
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId, {
+    transcriptContent: params.transcriptContent,
+    identity,
+  });
 
   return {
     success: true,

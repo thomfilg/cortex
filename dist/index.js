@@ -8922,27 +8922,33 @@ var VALUABLE_PATTERNS = [
   /config|setting|option|parameter/i
 ];
 async function parseTranscript(transcriptPath, startLine = 0) {
-  const result = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0
-    }
-  };
   if (!fs6.existsSync(transcriptPath)) {
-    return result;
+    return emptyParseResult();
   }
   const fileStream = fs6.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
   });
+  return parseTranscriptLines(rl, startLine);
+}
+function parseTranscriptContent(content, startLine = 0) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+function emptyParseResult() {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 }
+  };
+}
+async function parseTranscriptLines(lines, startLine) {
+  const result = emptyParseResult();
   const toolIdMap = /* @__PURE__ */ new Map();
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines) {
     currentLine++;
     if (currentLine <= startLine) {
       result.stats.totalLines++;
@@ -9243,8 +9249,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
     category: "project"
   };
   const result = {
@@ -9254,7 +9260,7 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   };
   const sessionId = getSessionId(transcriptPath);
   const startLine = getSessionProgress(db, sessionId);
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  const { messages, stats: parseStats } = options.transcriptContent !== void 0 ? await parseTranscriptContent(options.transcriptContent, startLine) : await parseTranscript(transcriptPath, startLine);
   if (messages.length === 0) {
     if (parseStats.totalLines > startLine) {
       updateSessionProgress(db, sessionId, parseStats.totalLines);
@@ -11277,6 +11283,8 @@ export {
   loadRecallState,
   loadSyncState,
   markAutoSaved,
+  parseTranscript,
+  parseTranscriptContent,
   readStdinWithResult,
   recordInjection,
   resetAutoSaveState,

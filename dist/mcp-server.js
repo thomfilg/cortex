@@ -599,15 +599,15 @@ var require_sql_wasm = __commonJS({
         "undefined" != typeof __filename ? ya = __filename : ba && (ya = self.location.href);
         var za = "", Aa, Ba;
         if (ca) {
-          var fs7 = __require("node:fs");
+          var fs8 = __require("node:fs");
           za = __dirname + "/";
           Ba = (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs7.readFileSync(a);
+            return fs8.readFileSync(a);
           };
           Aa = async (a) => {
             a = Ca(a) ? new URL(a) : a;
-            return fs7.readFileSync(a, void 0);
+            return fs8.readFileSync(a, void 0);
           };
           1 < process.argv.length && (wa = process.argv[1].replace(/\\/g, "/"));
           process.argv.slice(2);
@@ -915,7 +915,7 @@ var require_sql_wasm = __commonJS({
               if (ca) {
                 var b = Buffer.alloc(256), c = 0, d = process.stdin.fd;
                 try {
-                  c = fs7.readSync(d, b, 0, 256);
+                  c = fs8.readSync(d, b, 0, 256);
                 } catch (e) {
                   if (e.toString().includes("EOF"))
                     c = 0;
@@ -2408,6 +2408,7 @@ var require_sql_wasm = __commonJS({
 
 // src/mcp-server.ts
 import * as readline2 from "readline";
+import * as fs7 from "fs";
 
 // src/database.ts
 var import_sql = __toESM(require_sql_wasm(), 1);
@@ -7708,6 +7709,82 @@ function cosineSimilarity(a, b) {
   return dotProduct / denominator;
 }
 
+// src/identity.ts
+import * as fs3 from "fs";
+import * as os3 from "os";
+function sanitizeLabel(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+function osUsername() {
+  try {
+    const name = os3.userInfo().username;
+    if (name)
+      return sanitizeLabel(name);
+  } catch {
+  }
+  const envName = process.env.USER || process.env.USERNAME || process.env.LOGNAME;
+  return envName ? sanitizeLabel(envName) : "unknown";
+}
+function resolveUser(config) {
+  const fromEnv = process.env.CORTEX_USER;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.user;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return osUsername();
+}
+function isClaudeWeb() {
+  if (process.env.CLAUDE_CODE_WEB || process.env.CLAUDE_CODE_REMOTE)
+    return true;
+  if (process.env.CLAUDE_CODE_ENTRYPOINT === "web")
+    return true;
+  try {
+    if (fs3.existsSync("/root/.ccr/ca-bundle.crt"))
+      return true;
+  } catch {
+  }
+  return false;
+}
+function isWSL() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
+    return true;
+  try {
+    const version = fs3.readFileSync("/proc/version", "utf8");
+    return /microsoft/i.test(version);
+  } catch {
+    return false;
+  }
+}
+function platformLabel() {
+  switch (process.platform) {
+    case "win32":
+      return "windows";
+    case "darwin":
+      return "macos";
+    case "linux":
+      return "linux";
+    default:
+      return process.platform;
+  }
+}
+function detectEnvironment(user) {
+  if (isClaudeWeb())
+    return "claude-web";
+  if (isWSL())
+    return sanitizeLabel(`${user}-wsl`);
+  return sanitizeLabel(`${user}-${platformLabel()}`);
+}
+function resolveEnvironment(config) {
+  const fromEnv = process.env.CORTEX_ENVIRONMENT;
+  if (fromEnv && fromEnv.trim())
+    return sanitizeLabel(fromEnv.trim());
+  const fromConfig = config.identity?.environment;
+  if (fromConfig && fromConfig.trim())
+    return sanitizeLabel(fromConfig.trim());
+  return detectEnvironment(resolveUser(config));
+}
+
 // src/embeddings.ts
 var MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5";
 var EMBEDDING_DIM = 768;
@@ -7923,82 +8000,6 @@ function applyRecencyDecay(results) {
 import * as fs4 from "fs";
 import * as readline from "readline";
 
-// src/identity.ts
-import * as fs3 from "fs";
-import * as os3 from "os";
-function sanitizeLabel(value) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
-}
-function osUsername() {
-  try {
-    const name = os3.userInfo().username;
-    if (name)
-      return sanitizeLabel(name);
-  } catch {
-  }
-  const envName = process.env.USER || process.env.USERNAME || process.env.LOGNAME;
-  return envName ? sanitizeLabel(envName) : "unknown";
-}
-function resolveUser(config) {
-  const fromEnv = process.env.CORTEX_USER;
-  if (fromEnv && fromEnv.trim())
-    return sanitizeLabel(fromEnv.trim());
-  const fromConfig = config.identity?.user;
-  if (fromConfig && fromConfig.trim())
-    return sanitizeLabel(fromConfig.trim());
-  return osUsername();
-}
-function isClaudeWeb() {
-  if (process.env.CLAUDE_CODE_WEB || process.env.CLAUDE_CODE_REMOTE)
-    return true;
-  if (process.env.CLAUDE_CODE_ENTRYPOINT === "web")
-    return true;
-  try {
-    if (fs3.existsSync("/root/.ccr/ca-bundle.crt"))
-      return true;
-  } catch {
-  }
-  return false;
-}
-function isWSL() {
-  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP)
-    return true;
-  try {
-    const version = fs3.readFileSync("/proc/version", "utf8");
-    return /microsoft/i.test(version);
-  } catch {
-    return false;
-  }
-}
-function platformLabel() {
-  switch (process.platform) {
-    case "win32":
-      return "windows";
-    case "darwin":
-      return "macos";
-    case "linux":
-      return "linux";
-    default:
-      return process.platform;
-  }
-}
-function detectEnvironment(user) {
-  if (isClaudeWeb())
-    return "claude-web";
-  if (isWSL())
-    return sanitizeLabel(`${user}-wsl`);
-  return sanitizeLabel(`${user}-${platformLabel()}`);
-}
-function resolveEnvironment(config) {
-  const fromEnv = process.env.CORTEX_ENVIRONMENT;
-  if (fromEnv && fromEnv.trim())
-    return sanitizeLabel(fromEnv.trim());
-  const fromConfig = config.identity?.environment;
-  if (fromConfig && fromConfig.trim())
-    return sanitizeLabel(fromConfig.trim());
-  return detectEnvironment(resolveUser(config));
-}
-
 // src/logger.ts
 var globalVerbose = false;
 var globalJsonOutput = false;
@@ -8095,27 +8096,33 @@ var VALUABLE_PATTERNS = [
   /config|setting|option|parameter/i
 ];
 async function parseTranscript(transcriptPath, startLine = 0) {
-  const result = {
-    messages: [],
-    stats: {
-      totalLines: 0,
-      parsedLines: 0,
-      skippedLines: 0,
-      emptyLines: 0,
-      parseErrors: 0
-    }
-  };
   if (!fs4.existsSync(transcriptPath)) {
-    return result;
+    return emptyParseResult();
   }
   const fileStream = fs4.createReadStream(transcriptPath);
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity
   });
+  return parseTranscriptLines(rl, startLine);
+}
+function parseTranscriptContent(content, startLine = 0) {
+  const lines = content.split(/\r?\n/);
+  if (lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+  return parseTranscriptLines(lines, startLine);
+}
+function emptyParseResult() {
+  return {
+    messages: [],
+    stats: { totalLines: 0, parsedLines: 0, skippedLines: 0, emptyLines: 0, parseErrors: 0 }
+  };
+}
+async function parseTranscriptLines(lines, startLine) {
+  const result = emptyParseResult();
   const toolIdMap = /* @__PURE__ */ new Map();
   let currentLine = 0;
-  for await (const line of rl) {
+  for await (const line of lines) {
     currentLine++;
     if (currentLine <= startLine) {
       result.stats.totalLines++;
@@ -8416,8 +8423,8 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   const config = loadConfig();
   const minLength = config.archive.minContentLength || MIN_CONTENT_LENGTH;
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: options.identity ? options.identity.user : resolveUser(config),
+    environment: options.identity ? options.identity.environment : resolveEnvironment(config),
     category: "project"
   };
   const result = {
@@ -8427,7 +8434,7 @@ async function archiveSession(db, transcriptPath, projectId, options = {}) {
   };
   const sessionId = getSessionId(transcriptPath);
   const startLine = getSessionProgress(db, sessionId);
-  const { messages, stats: parseStats } = await parseTranscript(transcriptPath, startLine);
+  const { messages, stats: parseStats } = options.transcriptContent !== void 0 ? await parseTranscriptContent(options.transcriptContent, startLine) : await parseTranscript(transcriptPath, startLine);
   if (messages.length === 0) {
     if (parseStats.totalLines > startLine) {
       updateSessionProgress(db, sessionId, parseStats.totalLines);
@@ -8880,8 +8887,8 @@ async function handleRemember(db, params) {
   const embedding = await embedQuery(textToEmbed);
   const config = loadConfig();
   const identity = {
-    user: resolveUser(config),
-    environment: resolveEnvironment(config),
+    user: params.user !== void 0 ? params.user : resolveUser(config),
+    environment: params.environment !== void 0 ? params.environment : resolveEnvironment(config),
     category: category && MEMORY_CATEGORIES.includes(category) ? category : "project"
   };
   const result = storeManualMemory(db, content, embedding, projectId || null, context, identity);
@@ -8927,7 +8934,11 @@ async function handleSave(db, params) {
     }
   }
   const effectiveProjectId = global ? null : projectId || null;
-  const result = await archiveSession(db, transcriptPath, effectiveProjectId);
+  const identity = params.user !== void 0 || params.environment !== void 0 ? { user: params.user ?? null, environment: params.environment ?? null } : void 0;
+  const result = await archiveSession(db, transcriptPath, effectiveProjectId, {
+    transcriptContent: params.transcriptContent,
+    identity
+  });
   return {
     success: true,
     archived: result.archived,
@@ -9406,6 +9417,46 @@ async function forwardMcpRequest(request, timeoutMs = 3e5) {
 }
 
 // src/mcp-server.ts
+var IDENTITY_TOOLS = /* @__PURE__ */ new Set(["cortex_remember", "cortex_save", "cortex_archive"]);
+var ARCHIVE_TOOLS = /* @__PURE__ */ new Set(["cortex_save", "cortex_archive"]);
+function augmentRemoteToolCall(request) {
+  if (request.method !== "tools/call")
+    return request;
+  const params = request.params;
+  const name = params?.name;
+  if (!name || !IDENTITY_TOOLS.has(name) && !ARCHIVE_TOOLS.has(name))
+    return request;
+  const config = loadConfig();
+  const args = { ...params?.arguments ?? {} };
+  if (IDENTITY_TOOLS.has(name)) {
+    if (args.user === void 0)
+      args.user = resolveUser(config);
+    if (args.environment === void 0)
+      args.environment = resolveEnvironment(config);
+  }
+  if (ARCHIVE_TOOLS.has(name) && args.transcriptContent === void 0) {
+    const resolved = resolveTranscriptPath(args.transcriptPath, args.projectId);
+    if (resolved && fs7.existsSync(resolved)) {
+      try {
+        args.transcriptContent = fs7.readFileSync(resolved, "utf8");
+        args.transcriptPath = resolved;
+      } catch {
+      }
+    }
+  }
+  return { ...request, params: { ...params, arguments: args } };
+}
+function resolveTranscriptPath(transcriptPath, projectId) {
+  if (transcriptPath)
+    return transcriptPath;
+  if (projectId) {
+    const session = getCurrentSession(projectId);
+    if (session)
+      return session.transcriptPath;
+  }
+  const recent = getMostRecentSession();
+  return recent ? recent.transcriptPath : null;
+}
 async function resolveMode() {
   const config = loadConfig();
   if (isRemoteModeEnabled()) {
@@ -9423,13 +9474,14 @@ async function resolveMode() {
   return "local";
 }
 async function dispatchProxy(request) {
+  const outbound = isRemoteModeEnabled() ? augmentRemoteToolCall(request) : request;
   try {
-    return await forwardMcpRequest(request);
+    return await forwardMcpRequest(outbound);
   } catch {
     const recovered = await ensureDaemon();
     if (recovered) {
       try {
-        return await forwardMcpRequest(request);
+        return await forwardMcpRequest(outbound);
       } catch (retryError) {
         return {
           jsonrpc: "2.0",

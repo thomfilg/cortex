@@ -335,11 +335,20 @@ default `project`) is the generalization axis that scopes recall — see below.
 cwd) → env. The project `.cortex/` folder holds config only (never the DB);
 teams commit it to share `project` + `remote.url`.
 
-Known limitation: transcript-based archive (`cortex_save`/`cortex_archive`)
-reads the transcript file server-side, so archive-to-remote needs a
-content-upload path (follow-up). Content-based operations — `cortex_remember`,
-`cortex_recall`, restore, stats, and all management tools — work fully over
-remote.
+**Attribution over remote:** writes must be attributed to the authoring
+machine, not the server. In remote mode the MCP stdio proxy augments
+`cortex_remember`/`cortex_save`/`cortex_archive` before forwarding — injecting
+the client's resolved `user`/`environment` — and for the archive tools it
+resolves the transcript path locally and uploads the transcript CONTENT (the
+server can't read the client's disk). The server parses the uploaded content
+(`archiveSession` accepts `transcriptContent` + an `identity` override; see
+`parseTranscriptContent`). So `cortex_save`/`cortex_archive` and
+`cortex_remember`, `cortex_recall`, restore, stats, and management tools all
+work fully over remote.
+
+Known limitation: automation hooks (auto-recall, statusline, auto-archive)
+still gate on `daemon.enabled`; routing them through remote is a follow-up
+(the MCP tool surface already works over remote).
 
 ### Category-Scoped Recall
 
